@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package game.configs;
+
+import "exceldb/options.proto";
+
+option csharp_namespace = "Game.Configs";
+
+message CharacterConfig {
+  option (exceldb.table) = {
+    kind: ASSET
+    id: 1
+  };
+
+  string key = 1 [(exceldb.key) = 1];
+  string name = 2;
+  int32 hp = 3;
+  exceldb.ExternalRef icon = 4;
+  repeated exceldb.RowRef skills = 5 [(exceldb.ref_table) = "SkillConfig"];
+}
+
+message SkillConfig {
+  option (exceldb.table) = {
+    kind: ASSET
+    id: 2
+  };
+
+  string key = 1 [(exceldb.key) = 1];
+  int32 cost = 2;
+  exceldb.RowRef payload = 3 [(exceldb.ref_group) = "EffectPayload"];
+  repeated exceldb.RowRef chains = 4 [(exceldb.ref_table) = "SkillConfig"];
+}
+
+message BuffConfig {
+  option (exceldb.table) = {
+    kind: ASSET
+    id: 3
+    implements: "EffectPayload"
+  };
+
+  string key = 1 [(exceldb.key) = 1];
+  int32 duration = 2;
+  exceldb.ExternalRef vfx = 3;
+}
+
+message BulletConfig {
+  option (exceldb.table) = {
+    kind: ASSET
+    id: 4
+    implements: "EffectPayload"
+  };
+
+  string key = 1 [(exceldb.key) = 1];
+  int32 speed = 2;
+}
+
+message LevelConfig {
+  option (exceldb.table) = {
+    kind: ASSET
+    id: 5
+  };
+
+  int32 stage = 1 [(exceldb.key) = 1];
+  string difficulty = 2 [(exceldb.key) = 2];
+  int32 hp_scale = 3;
+  repeated exceldb.RowRef bosses = 4 [(exceldb.ref_table) = "CharacterConfig"];
+}

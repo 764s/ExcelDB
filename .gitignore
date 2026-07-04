@@ -61,6 +61,7 @@ sysinfo.txt
 
 # FlowVM keeps hand-written project files for local tests/benchmarks.
 !src/**/*.csproj
+!samples/**/*.csproj
 !tests/**/*.csproj
 !benchmarks/**/*.csproj
 
