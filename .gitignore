@@ -6,6 +6,8 @@
 /[Ll]ibrary/
 /[Tt]emp/
 /[Oo]bj/
+**/[Bb]in/
+**/[Oo]bj/
 /[Bb]uild/
 /[Bb]uilds/
 /[Ll]ogs/
@@ -56,6 +58,11 @@ ExportedObj/
 
 # Unity3D generated file on crash reports
 sysinfo.txt
+
+# FlowVM keeps hand-written project files for local tests/benchmarks.
+!src/**/*.csproj
+!tests/**/*.csproj
+!benchmarks/**/*.csproj
 
 # Builds
 *.apk
