@@ -2,11 +2,13 @@
 
 ## 1. 宏观目标
 
-ExcelDB 的目标不是做一个普通的“Excel 表格读取库”，而是把游戏配置当作 Unity-like assets 管起来：策划仍然用 Excel 高速迭代表格，程序和工具用 Unity-like API 读写对象，运行中的游戏可以在 Excel 源和 Excel converted bytes 源之间切换，并在不重启的情况下看到配置变化。
+ExcelDB 的目标不是做一个普通的“Excel 表格读取库”，而是把游戏配置当作 Unity-like assets 管起来：策划仍然用 Excel 高速迭代表格，程序和工具用 Unity-like API 读写对象，运行中的游戏可以在 Excel 源和 Excel converted bytes 源之间切换，并在不重启的情况下看到配置变化。首要接入目标是 Unity 2022.3，但 Unity 不是唯一接入目标；核心 schema、source、object/runtime 模型必须能被其他宿主复用。
 
 宏观目标：
 
-- API 像素级贴近 Unity，类名、方法名、属性名尽量保持一致，仅通过 namespace 区分。
+- Unity 2022.3 adapter 的 API 像素级贴近 Unity，类名、方法名、属性名尽量保持一致，仅通过 namespace 区分。
+- 首要接入目标是 Unity 2022.3，并提供完整 Unity adapter。
+- Unity 不是唯一接入目标，核心库不能依赖 UnityEngine / UnityEditor。
 - Excel 是真正的存盘对象，而不是临时导入源或一次性中间文件。
 - 一行配置是一个可加载、可引用、可编辑、可保存的 asset object。
 - 支持 `Object`、`ScriptableObject`、`AssetDatabase`、`SerializedObject`、`SerializedProperty` 这一套编辑模型。
@@ -18,6 +20,73 @@ ExcelDB 的目标不是做一个普通的“Excel 表格读取库”，而是把
 - 支持 Excel 与 Excel converted bytes 在运行中热切换。
 - 支持 Excel 修改热更新到运行中的数据，尽量保持已加载 object identity，让持有配置引用的系统看到新值。
 - 运行时和编辑期尽量共用同一套读 API，差异集中在 data source、mutability policy 和 editor-only 操作。
+- 高性能是宏观目标：除初始化阶段的 source open / 首次批量导入和水位线增长以外，运行时稳定热路径应避免产生 GC allocation。
+
+### 1.1 最终敲定需求索引
+
+后续实现以本节为准。后文的推演、缺口和阶段计划如果出现“建议”“可选”“当前缺口”等语气，应理解为围绕这些最终需求展开，而不是降低这些需求的优先级。
+
+1. 平台接入目标。
+   - 首要落地目标是 Unity 2022.3。
+   - Unity adapter 必须完整覆盖编辑器接入、Play Mode 调数、Unity 资源引用、converted bytes 验证和正式包读取。
+   - Unity 不是唯一接入目标；核心 schema、source、object/runtime、convert pipeline 不依赖 UnityEngine / UnityEditor。
+   - 非 Unity 宿主可以复用同一套 schema、workbook metadata、converted bytes、runtime data source 和 reference family 扩展机制。
+
+2. Unity-like API 是 Unity 接入的对外形态。
+   - Unity 已有同构概念使用同名 API，仅 namespace 不同。
+   - Unity 没有的 ExcelDB 概念使用统一的 ExcelDB-native 命名，例如 `RuntimeDatabase`、`ExcelDataSource`、`ConvertedBytesDataSource`。
+   - 非 Unity 接入可以保留核心概念，也可以提供宿主自己的 facade；不能反向污染核心 contract。
+
+3. Schema 是有效表结构唯一来源。
+   - 字段名、字段类型、枚举、简单结构体、导出端、默认值、必填性、引用规则、校验、布局、editor capability 都由 schema 声明。
+   - 简单结构体由 schema 决定写入单 cell，还是自动展开为多列。
+   - Excel 表头中的结构信息、字段注释、枚举可选值和结构体展开说明是 schema 的落盘展示和诊断入口，不是另一份事实源。
+
+4. Excel 是一等存盘对象和主 authoring surface。
+   - 策划可以直接修改 Excel 来调数、加行、改备注。
+   - 自定义 inspector 是效率工具，不是唯一入口。
+   - Excel 修改必须能进入验证、合并、诊断、保存和运行中热更新流程。
+
+5. Workbook 必须有原生分区和所有权。
+   - schema-owned structure region 由 schema 生成和修正。
+   - data region 保存正式数据行，生成结构时不得清空。
+   - helper/freeform region 保存策划辅助信息，只要不影响导入导出就保留。
+   - metadata region 保存身份、schema hash、field mapping、row revision 等系统信息。
+
+6. 稳定身份必须来自 metadata。
+   - workbook guid、table id、field id、row guid/local id 是身份基础。
+   - key、sheet name、header text、asset path 是可变展示或定位信息，不作为最终身份。
+
+7. 引用系统必须按 reference family 设计。
+   - 内部资产引用、Unity asset 引用、插件外部引用分别有身份、校验、导出和诊断规则。
+   - Unity asset 原生使用 `UnityResourceRef { guid, main_asset_path }`。
+   - guid 是身份，main asset path 是给人看的主资源路径。
+
+8. Excel 与 converted bytes 是一等 data source。
+   - 两者共享 schema hash、identity、reference graph 和读取 API。
+   - `RuntimeDatabase` 必须支持 Excel 与 converted bytes 的事务式 open/switch/refresh。
+   - 切源失败时保留旧 source 和旧 object graph。
+
+9. 热更新必须保持运行中对象图的一致性。
+   - 能 patch 的对象优先保持 object identity。
+   - 无法 patch 时必须发出 added、removed、moved、renamed、recreated、property changed、dependency changed 等事件。
+   - 业务缓存失效不能靠调用方猜。
+
+10. 高性能和 GC 边界是核心需求。
+   - 初始化阶段的 source open、首次批量导入、convert、schema generation、import report 生成可以分配内存。
+   - 水位线增长可以分配内存；水位线指对象池、索引、事件缓冲、diff buffer、临时工作区等达到历史最大容量时的扩容。
+   - 达到水位线后的运行时热路径应避免 GC allocation，包括 `LoadAsset`、引用解析、key/path 查找、遍历依赖、读取字段、source switch commit、hot reload patch 和 change event 分发。
+   - 性能设计优先使用预分配、对象池、stable buffers、batch/coalesce 事件和增量索引，避免 LINQ、闭包、装箱、临时字符串、反射热路径和 per-row/per-property 临时对象。
+
+11. 所有危险操作都走 operation transaction/report。
+   - 生成表结构、metadata flush、import、save、convert、source switch、hot reload 都必须先 analyze/diff/classify/report，再 commit。
+   - safe、warning、error、blocker 的语义跨流程一致。
+   - blocker 不写 workbook、不清空数据、不替换旧 runtime source。
+
+12. 旧 `ConfigDatabase` 只能作为内部实现资产。
+    - 可以复用其 transaction、undo、loader、dependency graph 能力。
+    - 对外模型必须由 Object、SerializedObject、AssetDatabase、schema、workbook metadata 统一定义。
+    - 新 API 不能泄漏旧 TableId/RowId 表模型作为常规使用前提。
 
 ## 2. 游戏开发视角的核心工作流
 
@@ -58,7 +127,7 @@ ExcelDB 的目标不是做一个普通的“Excel 表格读取库”，而是把
 
 ## 3. 命名原则
 
-采用方案：完全一样的命名，仅 namespace 不一样。
+采用方案：Unity 2022.3 adapter 和默认 C# facade 尽量使用完全一样的命名，仅 namespace 不一样。核心 schema/source/runtime contract 保持宿主无关，非 Unity 接入可以在不改变核心 contract 的前提下提供自己的 facade。
 
 目标 namespace：
 
@@ -80,13 +149,14 @@ Undo
 EditorUtility
 ```
 
-不采用 `ExcelAssetDatabase`、`ExcelSerializedObject`、`ExcelUndo` 这种前缀风格。原因是宏观目标要求 Unity-like API，前缀式命名会让调用层一直暴露“这是另一个系统”的味道。
+Unity adapter 不采用 `ExcelAssetDatabase`、`ExcelSerializedObject`、`ExcelUndo` 这种前缀风格。原因是宏观目标要求 Unity-like API，前缀式命名会让调用层一直暴露“这是另一个系统”的味道。
 
 但 Unity 本身没有“运行时在 Excel 和 converted bytes 之间切换数据源”的现成 API。这里不强行伪装成 Unity 已有类型，而是作为 ExcelDB 的必要扩展处理：
 
 - Unity 已有概念：保持同名，例如 `Object`、`ScriptableObject`、`AssetDatabase`、`SerializedObject`、`SerializedProperty`、`Undo`。
 - Unity 没有的概念：保持统一风格，例如 `RuntimeDatabase`、`ExcelDataSource`、`ConvertedBytesDataSource`。
 - 不混用半截前缀风格，例如不用 `ExcelAssetDatabase`，也不用把数据源切换硬塞进不合适的 Unity 类型里。
+- 非 Unity 宿主不能要求核心库引入 Unity 类型；它们通过 adapter 暴露宿主习惯的 API，但继续共享 schema、metadata、source、convert 和 runtime identity。
 
 ## 4. 目标调用示范
 
@@ -271,23 +341,25 @@ RuntimeDatabase.objectChanged += obj =>
 
 ### 6.1 Engine 层
 
-`ExcelDbEngine` 负责运行时可用的对象和只读数据访问：
+`ExcelDbEngine` 负责宿主无关的运行时对象和只读数据访问：
 
 - `Object`
 - `ScriptableObject`
 - `RuntimeDatabase`
 - `RowRef` / object reference bridge
-- `UnityResourceRef` / Unity asset reference family
+- reference family registry
 - converted bytes data source
 - optional Excel data source for debug
 
 核心原则：
 
 - 运行时默认只读。
+- 不依赖 UnityEngine / UnityEditor。
+- 除初始化阶段的 source open / 首次批量导入和水位线增长以外，运行时热路径避免 GC allocation。
 - asset object 有稳定 identity。
 - 热切换时尽量保留 object identity。
 - 对象内容变化要能通知持有者重建派生缓存。
-- Unity 外部资源引用以 guid 为身份，path 只作为可读展示和诊断。
+- 外部资源引用通过 reference family 扩展，不把某个宿主的资源系统写死进核心。
 - 不让业务层直接依赖 Excel workbook 细节。
 
 ### 6.2 Editor 层
@@ -334,9 +406,33 @@ Source 层还要定义热更新结果：
 - key 变化：identity 不变，key index 更新，触发 asset moved/renamed 类事件。
 - 引用变化：依赖图更新，触发相关缓存失效。
 
+### 6.4 Platform adapter 层
+
+Platform adapter 负责把宿主引擎/工具链接入核心 contract。第一目标是 Unity 2022.3 adapter，但 adapter 机制不能只服务 Unity。
+
+Unity 2022.3 adapter 至少负责：
+
+- 绑定 Unity Editor 菜单、import/refresh/save 生命周期和 Play Mode 调数入口。
+- 提供 Unity-like `AssetDatabase`、`SerializedObject`、`SerializedProperty`、`Undo` 使用体验。
+- 提供 `UnityResourceRef` reference family：guid 为身份，main asset path 为展示。
+- 处理 Unity asset picker、guid/path 同步、asset move/rename 诊断。
+- 将 converted bytes 集成进 Unity 构建、开发包和正式包读取流程。
+
+非 Unity adapter 可以负责：
+
+- 提供宿主自己的资源引用结构和 resource resolver。
+- 提供宿主自己的编辑入口、命令行、Web 工具或服务器热更新入口。
+- 复用 workbook metadata、schema compatibility、converted bytes、runtime source switch 和 hot reload 事务。
+
+边界约束：
+
+- Engine/schema/source 不直接引用 UnityEngine / UnityEditor。
+- Unity 资源相关规则放在 Unity adapter 和 `UnityResourceRef` reference family 中。
+- 新宿主不能修改核心语义来适配自己；应通过 reference family、source、editor facade、validator、converter extension 扩展。
+
 ## 7. Schema 具体能力审查（第一步）
 
-第一步不是先做 `Object` 或 `AssetDatabase` facade，而是先把 schema 定义成全系统契约。Schema 决定：
+第一步不是先做 `Object` 或 `AssetDatabase` API 外壳，而是先把 schema 定义成全系统契约。Schema 决定：
 
 - Excel 如何生成和升级。
 - 一行数据如何成为 asset object。
@@ -360,8 +456,11 @@ Source 层还要定义热更新结果：
 - 是否必填。
 - 引用目标。
 - 校验规则。
+- 枚举可选值。
+- 简单结构体的写入/展开方式。
 - 字段说明。
 - 下拉选项。
+- 表头注释。
 
 在 ExcelDB 的目标模型里，**会影响导入、导出、运行时解释的表结构，总是由 schema 控制**。Excel 里的表头、类型、导出端、规则、引用目标等，可以展示给策划看，但它们不是第二份 schema。
 
@@ -386,10 +485,11 @@ Excel 中可以展示这些 schema 生成的信息：
 第4行：导出端      all       client    all       server    client
 第5行：规则        required  required  >=0       >=0       UnityGuidRequired
 第6行：说明        唯一ID    显示名    魔法消耗  基础伤害  UI图标
-第7行以后：数据
+第7行：注释        不可重复  -         >=0      >=0      path 显示，guid 为身份
+第8行以后：数据
 ```
 
-其中第 1-6 行属于 schema 管辖的结构区域。生成表时只生成或修正这些结构区域中 schema 管辖的内容；正式数据行必须保留：
+其中第 1-7 行属于 schema 管辖的结构区域。生成表时只生成或修正这些结构区域中 schema 管辖的内容；正式数据行必须保留：
 
 ```text
 fireball  火球术  10  100  Assets/UI/Icons/fire.png|8f3a...
@@ -404,7 +504,9 @@ ice_nova  冰环    20  80   Assets/UI/Icons/ice.png|2ab1...
 - 必填、范围、正则来自 validators。
 - 引用目标来自 ref schema。
 - 下拉来自 enum/ref/object picker schema。
-- 说明来自 schema doc comment 或 field description。
+- 说明和表头注释来自 schema doc comment、field description 或 header comment。
+- 枚举可选值来自 schema enum 定义，并写入表头注释和 data validation。
+- 简单结构体的单 cell / 多列展开方式来自 schema value shape。
 
 允许策划维护并保留的信息应明确分层：
 
@@ -416,6 +518,7 @@ ice_nova  冰环    20  80   Assets/UI/Icons/ice.png|2ab1...
 生成表时的约定：
 
 - 只生成或修正 schema 管辖的表结构。
+- 由 schema 生成表头注释；枚举字段必须能在表头注释中看到可选值。
 - 不重建整张 sheet。
 - 不清空正式数据行。
 - 不删除 schema 不认识但不影响导入/导出的辅助行/列/样式/批注。
@@ -598,7 +701,8 @@ ice_nova  冰环    20  80   Assets/UI/Icons/ice.png|2ab1...
 需要表达每种字段如何在 Excel 中展开：
 
 - scalar：单 cell。
-- enum：名称、数字、别名、下拉选项。
+- enum：由 schema 定义名称、数字、显示名、别名、下拉选项、导出表示。
+- simple struct：由 schema 定义字段集合，并声明单 cell 写入或多 cell 自动展开。
 - repeated scalar：单 cell 分隔、横向多列、纵向子表三种策略。
 - repeated object/ref：顺序是否重要、是否允许重复、最大数量。
 - map：是否支持，如何展开。
@@ -606,14 +710,34 @@ ice_nova  冰环    20  80   Assets/UI/Icons/ice.png|2ab1...
 - embedded message：JSON cell、展开列、独立子表。
 - polymorphic payload：group ref、oneof、sub-asset 三种策略。
 
+enum contract：
+
+- enum 本身可以由 schema 声明，不要求依赖运行时代码里的 C# enum。
+- 每个 enum value 至少有 stable value id / name，可选 display name、aliases、deprecated、description。
+- Excel 显示值、导入值、导出值的关系必须明确，例如按 name、number 或 explicit export token。
+- 表头注释必须列出可选值；当选项较多时可列出摘要，并指向 schema 生成的枚举说明区域。
+- Excel data validation dropdown 应从 enum schema 生成，不由策划手工维护。
+
+simple struct contract：
+
+- simple struct 是可被 schema 展开的轻量 value object，例如 `Vector2`、`RangeInt`、`CurvePoint`、`WeightedItem`。
+- schema 必须声明 `cell_mode`：`single_cell` 或 `expanded_columns`。
+- `single_cell` 模式必须声明稳定文本格式、分隔符/转义规则、示例值和 parse error 诊断。
+- `expanded_columns` 模式必须声明子字段列名、顺序、display name、field id、默认值和校验。
+- 展开后的子列仍属于同一个 logical field，metadata 需要能从任一子列追踪回父字段。
+- 表头注释必须说明结构体格式；多列展开时父字段和子字段都要有注释。
+
 原因：
 
 - 游戏配置里数组、嵌套结构、行为树、掉落表非常常见。
 - 统一用 JSON cell 虽然省事，但不利于策划直接编辑、校验和 diff。
+- enum 和简单结构体是策划最常接触的非标量值，必须让可选值、填写格式和展开列在 Excel 里直接可见。
 
 当前缺口：
 
 - repeated 目前是分号拼接。
+- enum 没有独立 schema contract，也没有表头注释/下拉生成规则。
+- simple struct 没有声明式 contract，单 cell 与展开列策略没有统一入口。
 - embedded message 目前偏 JSON。
 - map 不支持。
 - oneof/union、嵌套展开、子表策略未定义。
@@ -678,20 +802,20 @@ message UnityResourceRef {
 - guid 指向的 Unity asset 不存在，是 missing external asset。
 - 同一 guid 当前路径变化时，应刷新 path 展示，但不改变配置引用身份。
 
-Excel 表达建议：
-
-```text
-Assets/UI/Icons/fire.png|8f3a7c...
-```
-
-也可以拆成两列：
+Excel 默认表达采用拆列：
 
 ```text
 icon.path                     icon.guid
 Assets/UI/Icons/fire.png      8f3a7c...
 ```
 
-拆列更利于排序和肉眼检查，单 cell 更紧凑。无论哪种布局，schema 都要声明哪部分是 display path，哪部分是 identity guid。
+拆列更利于排序、筛选、肉眼检查和批量修复，也能避免 path 中出现分隔符时产生解析歧义。schema 必须声明哪部分是 display path，哪部分是 identity guid。
+
+单 cell 表达只作为紧凑布局或 legacy adapter 的 schema opt-in，不是 UnityResourceRef 的默认形态：
+
+```text
+Assets/UI/Icons/fire.png|8f3a7c...
+```
 
 原因：
 
@@ -752,11 +876,14 @@ Assets/UI/Icons/fire.png      8f3a7c...
 
 - sheet name。
 - header row。
+- header comment / note。
+- enum options comment。
 - metadata row/sheet。
 - column order。
 - hidden columns。
 - frozen panes / filter policy。
 - nested field 展开策略。
+- simple struct single-cell / expanded-columns layout。
 - unknown column preservation。
 - comments/diagnostics 写回策略。
 - data validation dropdown。
@@ -772,6 +899,7 @@ Assets/UI/Icons/fire.png      8f3a7c...
 - `layout` 只是字符串 hint，未形成 contract。
 - 保存是整 sheet 重建，和 layout schema 目标相反。
 - 没有 unknown column、样式、公式保留策略。
+- 没有 schema-driven header comment 生成策略，枚举可选值和结构体填写格式无法在表头直接查看。
 
 #### 7.4.8 SerializedProperty schema
 
@@ -858,8 +986,13 @@ Assets/UI/Icons/fire.png      8f3a7c...
 2. Field contract：
    - field id。
    - name。
+   - display name。
+   - header comment。
    - aliases。
    - type shape。
+   - enum definition。
+   - simple struct definition。
+   - simple struct cell mode。
    - default/required/nullability。
    - deprecated/reserved。
 3. Asset identity contract：
@@ -891,7 +1024,7 @@ Assets/UI/Icons/fire.png      8f3a7c...
    - required schema/layout version。
    - migration/fallback policy。
 
-### 7.6 推荐 schema 声明方向
+### 7.6 Schema 声明方向
 
 仍然可以以 proto option 为基础，但需要把 option 从“零散 hint”提升为“契约”：
 
@@ -918,6 +1051,10 @@ message FieldOptions {
   FieldLayout layout = 9;
   repeated Validator validators = 10;
   ExportPolicy export = 11;
+  string header_comment = 12;
+  ValueShape value_shape = 13;
+  EnumSchema enum_schema = 14;
+  SimpleStructSchema simple_struct = 15;
 }
 ```
 
@@ -930,6 +1067,8 @@ message FieldOptions {
 - 新建 workbook，metadata sheet 包含 table id、field id、schema hash。
 - rename sheet 后仍能识别同一 table。
 - rename field header 后能通过 field id 或 alias 迁移。
+- enum 字段生成表头注释和 data validation dropdown，注释能看到可选值。
+- simple struct 字段按 schema 指定写入单 cell 或展开为多列，并且表头注释说明填写格式。
 - 旧编辑器保存含 unknown column 的 workbook，不删除 unknown column。
 - 新 schema 增加 optional field，旧 workbook 可打开并补默认值。
 - 新 schema 增加 required field，旧 workbook 可打开但 convert bytes 被 blocker 阻止。
@@ -951,10 +1090,12 @@ message FieldOptions {
 - 建立 schema hash、table id、field id、row guid/local id 的 metadata 规范。
 - 定义 missing column、unknown column、field rename、table rename、type change 的兼容策略。
 - 定义 required/default/nullability、validation severity、convert blocker。
+- 定义 enum 与 simple struct contract：enum 可选值、显示/导出值、simple struct 单 cell / 多列展开。
 - 定义 reference family：内部资产引用、Unity asset 引用、插件外部引用分别有身份和诊断规则。
-- 定义 UnityResourceRef contract：guid 为身份，main_asset_path 为展示。
+- 定义 Unity 2022.3 adapter 的 `UnityResourceRef` contract：guid 为身份，main_asset_path 为展示。
+- 定义 platform adapter boundary：Unity 2022.3 adapter 是首个实现，核心 schema/source/runtime 不依赖 UnityEngine / UnityEditor。
 - 定义 Excel layout 与 unknown preservation 的最低协议。
-- 定义由 schema 生成的 Excel 结构行：中文名、字段名、类型、导出端、规则、说明。
+- 定义由 schema 生成的 Excel 结构行和表头注释：中文名、字段名、类型、导出端、规则、说明、枚举可选值、结构体填写格式。
 - 定义 schema 管辖区域和策划辅助区域：前者由 schema 生成/校验，后者在不影响导入导出时保留。
 - 定义 operation transaction/report：表结构生成、metadata flush、import、save、convert、source switch、hot reload 都要能 dry-run、风险分级和原子提交。
 - 定义 converted bytes schema compatibility rule。
@@ -962,7 +1103,9 @@ message FieldOptions {
 验收：
 
 - 新建 workbook 时生成 metadata sheet。
-- 新建 workbook 时生成 schema 驱动的表头结构行，策划不需要手填字段名/类型/导出端/规则。
+- 新建 workbook 时生成 schema 驱动的表头结构行和表头注释，策划不需要手填字段名/类型/导出端/规则/枚举可选值。
+- enum 字段的表头注释和 data validation dropdown 由 schema 生成。
+- simple struct 字段根据 schema 以单 cell 或多列展开生成表头和 metadata。
 - 重新生成表结构时只修正 schema 管辖结构，不清空正式数据行。
 - 不影响导入/导出的策划辅助行/列/样式/批注被保留。
 - 影响导入/导出的结构不一致会报错或警告。
@@ -971,6 +1114,7 @@ message FieldOptions {
 - rename sheet 不丢 table。
 - rename field 可通过 field id/alias 迁移。
 - Unity resource path rename 不改变引用身份，guid 缺失/无效会产生诊断。
+- 核心 Engine/schema/source 能在没有 Unity assemblies 的环境下成立；Unity 2022.3 相关依赖只出现在 Unity adapter。
 - 旧编辑器保存 unknown column 不丢数据。
 - 新 schema 加 optional field 可打开旧表并补默认。
 - 新 schema 加 required field 可打开旧表，但 convert bytes 被 blocker 阻止。
@@ -992,7 +1136,7 @@ message FieldOptions {
 - 同一个 asset 重复加载返回稳定 resident object。
 - asset path 和 guid 可互相转换。
 
-### Phase 3：建立 AssetDatabase facade
+### Phase 3：建立 AssetDatabase API 边界
 
 目标：
 
@@ -1000,12 +1144,12 @@ message FieldOptions {
 - 支持 `MountWorkbook`、`Refresh`、`SaveAssets`。
 - 支持 `FindAssets`、`LoadAssetAtPath`、`LoadAllAssetsAtPath`。
 - 支持 `CreateAsset`、`DeleteAsset`。
-- 接入当前 `ConfigDatabase` 的 load/edit/save 能力。
+- 将当前 `ConfigDatabase` 的 load/edit/save 能力放入内部适配层。
 
 验收：
 
 - API 调用形态接近 Unity。
-- 当前 CLI/sample 可以逐步迁移到 `AssetDatabase` facade。
+- 当前 CLI/sample 可以逐步迁移到 `AssetDatabase` API。
 - 不再要求上层直接操作 `TableId`、`RowId` 才能完成常规资产操作。
 
 ### Phase 4：SerializedObject / SerializedProperty
@@ -1015,7 +1159,7 @@ message FieldOptions {
 - 新增 `SerializedObject`。
 - 新增 `SerializedProperty`。
 - 支持 `FindProperty`、`GetIterator`、`NextVisible`。
-- 支持 primitive、enum、string、object reference。
+- 支持 primitive、enum、string、simple struct、object reference。
 - 支持 repeated/list 的 `arraySize`、`GetArrayElementAtIndex`、insert/delete/move。
 - `ApplyModifiedProperties` 接入 transaction、undo、dirty。
 
@@ -1024,7 +1168,7 @@ message FieldOptions {
 - 能用 property path 修改任意支持字段。
 - 数组引用编辑可工作。
 - undo/redo 可以按一次 `ApplyModifiedProperties` 为一个编辑单元。
-- 现有 direct draft edit 可以保留为底层能力，但推荐 API 变成 SerializedObject。
+- 现有 direct draft edit 只作为底层事务能力保留；常规对外编辑 API 统一走 `SerializedObject`。
 
 ### Phase 5：Excel 一等存盘对象
 
@@ -1075,6 +1219,7 @@ message FieldOptions {
 - 支持 `ExcelDataSource` 与 `ConvertedBytesDataSource` 热切换。
 - 支持 converted bytes 更新后热切换到运行中的数据。
 - 定义新增、删除、修改、key 变化、引用变化的热切换事件。
+- 定义 runtime GC budget：稳定水位线后的读取、查找、引用解析、source switch commit、hot reload patch、事件分发避免 GC allocation。
 
 验收：
 
@@ -1083,6 +1228,7 @@ message FieldOptions {
 - runtime 默认只读，修改 API 不可用或明确失败。
 - 热切换后已加载对象尽量保持 identity，不要求业务层重新获取所有引用。
 - 切回 converted bytes 后能验证正式包数据与 Excel 调试数据是否一致。
+- 在已完成初始化和水位线预热后，常规 `LoadAsset`、引用解析、key lookup、依赖遍历和 hot reload patch 的测试不产生 GC allocation。
 
 ### Phase 8：扩展体系
 
@@ -1111,6 +1257,7 @@ message FieldOptions {
 - 热切换优先保持 object identity；无法保持时必须显式发出删除/重建事件。
 - 所有引用最终都要有稳定 identity，不依赖易变行号或显示名。
 - 所有写操作都要经过 dirty/undo/save 生命周期。
+- 除初始化阶段的 source open / 首次批量导入、导入报告生成和水位线增长外，运行时稳定热路径避免 GC allocation。
 
 ## 10. 工作流模拟审查
 
@@ -2003,15 +2150,27 @@ RuntimeDatabase.EnableHotReload();
 
 缺失内容：
 
+- runtime allocation budget：除初始化阶段的 source open / 首次批量导入和水位线增长外，稳定热路径不产生 GC allocation。
+- 水位线预热机制：对象池、事件缓冲、diff buffer、索引、临时解析工作区可以主动 reserve。
 - workbook/sheet/row 级增量 import。
 - property-level diff。
 - 大表索引。
 - 大量 object changed event 的 batch/coalesce。
 - converted bytes lazy loading。
+- zero-allocation read path：`LoadAsset`、引用解析、key lookup、依赖遍历、字段读取不分配。
+- zero-allocation hot reload commit path：patch、事件分发、索引更新尽量复用 buffer。
+- GC allocation profiler test：在 Unity 2022.3 和核心 .NET 测试中都要能验证。
 
 实操影响：
 
 - 小样例全量 reload 没问题，大项目几万行配置会拖慢 Play Mode 反馈。
+- 运行时配置读取和热更新如果持续产生 GC，会把调数便利性转化成帧时间抖动，尤其在战斗、AI、UI 刷新和资源预加载高频路径里很明显。
+
+边界说明：
+
+- 允许初始化阶段的 source open、首次批量导入、convert、report 构建、diagnostic 字符串生成分配内存。
+- 允许超过历史容量时水位线增长并产生分配，但应可观测、可预热、可通过 report 暴露。
+- 不接受稳定容量后的 per-row、per-property、per-event 临时分配。
 
 #### 12.3.2 可观察性
 
@@ -2106,7 +2265,7 @@ RuntimeDatabase.EnableHotReload();
 后续计划应围绕这些原生协议展开，而不是在各阶段各自补规则：
 
 1. Schema contract protocol。
-   - 定义表、字段、引用、校验、布局、导出端、兼容性、editor capability。
+   - 定义表、字段、枚举、简单结构体、引用、校验、布局、表头注释、导出端、兼容性、editor capability。
    - schema 是有效表结构唯一来源。
 
 2. Workbook region ownership protocol。
@@ -2120,20 +2279,31 @@ RuntimeDatabase.EnableHotReload();
 4. Reference family protocol。
    - 内部资产引用、Unity asset 引用、插件外部引用分别有身份规则。
    - Unity asset 原生使用 `UnityResourceRef { guid, main_asset_path }`。
+   - Unity asset reference family 属于 Unity adapter 首发能力，不让核心库依赖 UnityEngine / UnityEditor。
 
-5. Operation transaction/report protocol。
+5. Platform adapter protocol。
+   - Unity 2022.3 是第一接入目标。
+   - 非 Unity 宿主通过 adapter 复用同一套 schema、metadata、source、convert、runtime identity 和 reference family extension。
+   - 核心库只能依赖宿主无关 contract，不能反向引用具体宿主 API。
+
+6. Operation transaction/report protocol。
    - 表结构生成、metadata flush、import、save、convert、source switch、hot reload 都必须先分析风险，再原子提交。
    - safe、warning、error、blocker 的判定标准跨流程一致。
 
-6. Data source protocol。
+7. Data source protocol。
    - Excel 与 converted bytes 是同一数据模型的不同 source。
    - open、switch、refresh、convert 都必须校验 schema hash、identity、reference graph。
 
-7. Runtime change propagation protocol。
+8. Performance and GC budget protocol。
+   - 初始化阶段的 source open、首次批量导入、convert、report 生成和水位线增长允许分配。
+   - 达到水位线后的运行时读取、查找、引用解析、依赖遍历、source switch commit、hot reload patch、事件分发应避免 GC allocation。
+   - 所有 runtime 热路径都要有 allocation budget 测试，Unity adapter 和宿主无关 runtime 都要能验证。
+
+9. Runtime change propagation protocol。
    - resident objects 的 patch、recreate、delete、dependency changed、index changed 都必须有事件。
    - 切源或热更新失败时保留旧 source 和旧 object graph。
 
-8. Editor capability and migration protocol。
+10. Editor capability and migration protocol。
    - generated code、custom editor、drawer、validator 与 workbook schema 都要有版本和能力检查。
    - 当编辑器结构落后于表结构时，必须能区分可编辑、只读、可保留、必须升级。
 
@@ -2142,9 +2312,12 @@ RuntimeDatabase.EnableHotReload();
 Phase 1 不应只叫 “schema options + workbook metadata”，而应该交付最小原生协议闭环：
 
 - schema contract。
+- value shape and header annotation，包含 enum、simple struct、表头注释和 dropdown。
 - workbook region ownership。
 - workbook metadata and identity。
 - reference family，至少包含 internal ref 与 UnityResourceRef。
+- platform adapter boundary，至少包含 Unity 2022.3 adapter 和核心无 Unity 依赖约束。
+- runtime performance and GC budget。
 - operation transaction/report。
 - compatibility matrix。
 - schema generation dry-run。
@@ -2152,20 +2325,209 @@ Phase 1 不应只叫 “schema options + workbook metadata”，而应该交付�
 
 后续 Phase 2 到 Phase 7 才是在这个协议闭环上实现 Object、AssetDatabase、SerializedObject、Excel source、runtime source switch 和 hot reload。这样不会出现“API 已经像 Unity，但 Excel 工作流靠补丁兜底”的结构性风险。
 
-## 14. 首批建议任务
+## 14. 执行细化：确定性默认决策
 
-1. 扩展 schema options 草案：
-   - table display/sheet/version/export。
-   - field display/type shape/aliases/default/required/export/layout/description。
-   - reference nullable/ownership/delete policy。
-   - UnityResourceRef guid/main_asset_path/asset_type/path_display policy。
-   - validator severity/mode。
-2. 定义 workbook metadata sheet 格式：
+本节用于消除实现时的自由发挥。若后文没有更具体的规则，默认按本节执行；若两个目标冲突，按优先级选择，并把被牺牲的目标写入 report。
+
+### 14.1 决策优先级
+
+1. 不丢数据，不破坏用户 workbook。
+2. schema 是唯一结构事实源，metadata 是唯一稳定身份源。
+3. 所有结构写入、import、save、convert、source switch、hot reload 都必须事务化。
+4. runtime object identity 和 change event 必须一致，业务缓存不能靠猜。
+5. 达到水位线后的 runtime 热路径避免 GC allocation。
+6. 核心库保持宿主无关，Unity 2022.3 只在 adapter 中出现。
+7. Unity adapter 的对外 API 像素级贴近 Unity。
+8. Excel authoring 体验优先保留策划手工辅助信息。
+
+解释：
+
+- 数据安全高于 API 好看；如果一次保存会丢未知列、样式、公式或正式数据行，必须拒绝或进入手动修复流程。
+- 身份稳定高于显示文本；key、sheet name、header text、asset path 都可以变，metadata identity 不能被静默重建。
+- 运行时热路径性能高于调试便利；需要诊断字符串时应在 report 构建或 editor/debug 路径中生成，不在稳定帧内生成。
+
+### 14.2 默认 assembly / adapter 边界
+
+默认至少拆成三类边界：
+
+- `ExcelDbEngine`：宿主无关 runtime、object identity、source、converted bytes reader、reference family registry、GC budget 基础设施。
+- `ExcelDbEditor`：宿主无关的编辑抽象、schema generation、workbook import/export、diagnostic/report、transaction。
+- Unity 2022.3 adapter：UnityEditor 菜单、import hook、asset picker、Play Mode hot reload、Unity build integration、`UnityResourceRef` resolver。
+
+硬约束：
+
+- `ExcelDbEngine`、schema、source、convert pipeline 不引用 `UnityEngine` / `UnityEditor`。
+- `UnityResourceRef` 是 Unity adapter 首发的 reference family；核心只认识 reference family contract，不认识 Unity asset database。
+- 非 Unity adapter 不能修改 schema/workbook/runtime 的核心语义，只能通过 reference family、source、editor facade、validator、converter extension 扩展。
+
+### 14.3 默认 workbook 布局
+
+默认 workbook 由三类 sheet 组成：
+
+- table sheet：策划日常编辑的可见表。
+- `__ExcelDB_Metadata`：系统 metadata sheet，默认 hidden / very hidden。
+- 可选 generated helper sheet：例如 enum 大量可选值说明、diagnostic summary；这些 sheet 必须有 metadata 标记，不能被当作 table sheet。
+
+table sheet 默认结构：
+
+```text
+第1行：display name / 中文名
+第2行：field path / 字段路径
+第3行：value shape / 类型与展开方式
+第4行：export policy / 导出端
+第5行：validation / 规则
+第6行：description / 说明
+第7行：header comment / 注释
+第8行以后：正式数据行
+```
+
+默认规则：
+
+- 第 1-7 行是 schema-owned structure region，由 schema 生成和修正。
+- field id 不依赖 visible header text，默认记录在 `__ExcelDB_Metadata`；可额外生成 hidden row/column 方便调试，但 importer 不能只依赖它。
+- data region 从第 8 行开始，生成结构时不得清空、重排或隐式改写正式数据。
+- 不依赖 merged cells 进行导入；merged cells 只能作为显示样式，语义以 metadata 和 column mapping 为准。
+- simple struct 的 `expanded_columns` 默认使用 `parent.child` 字段路径，例如 `range.min`、`range.max`。
+- simple struct 的 `single_cell` 必须在 header comment 中给出格式和示例。
+- enum 字段必须生成 Excel data validation dropdown；可选值过多时，header comment 给摘要，并指向 generated enum helper sheet。
+
+### 14.4 默认 metadata 格式
+
+`__ExcelDB_Metadata` 默认保存四类记录，格式可以是多块 table 或同 sheet 分区，但字段语义必须稳定：
+
+1. workbook record：
    - workbook guid。
    - schema hash。
-   - table id -> sheet。
-   - field id -> column。
-   - row guid/local id/revision。
+   - layout hash。
+   - generator version。
+   - last successful import revision。
+
+2. table record：
+   - table id。
+   - schema name。
+   - current sheet name。
+   - table version。
+   - data start row。
+   - table kind / export policy。
+
+3. field record：
+   - table id。
+   - field id。
+   - field path。
+   - column index。
+   - value shape。
+   - parent field id，适用于 simple struct / nested field。
+   - deprecated / reserved 状态。
+
+4. row record：
+   - table id。
+   - row guid / local id。
+   - current row number。
+   - key snapshot。
+   - row revision。
+   - source hash 或 cell range hash。
+
+hash 规则：
+
+- `schema hash` 只覆盖会影响 import、export、runtime 解释、reference、validation blocker 的语义。
+- `layout hash` 覆盖 display name、description、header comment、列顺序、冻结窗格、筛选、Excel authoring layout。
+- 只改注释、中文名或表头说明不应导致 converted bytes schema hash 不兼容，但可以触发布局刷新。
+
+### 14.5 默认 operation transaction 流程
+
+所有危险操作默认走同一流程：
+
+1. Analyze：只读 workbook/source/runtime state，读取 schema 和 metadata。
+2. Build candidate：构建 candidate workbook/source/object graph，不修改当前状态。
+3. Diff：生成 structure/data/metadata/runtime diff。
+4. Classify：把每个 diff 标成 safe、warning、error、blocker。
+5. Report：输出人类可读 report 和机器可读 report。
+6. Pre-commit：准备 backup、临时文件、buffer reserve、identity map、event buffer。
+7. Commit：原子替换 workbook/source/object graph 或 patch resident objects。
+8. Verify：复读关键 metadata、schema hash、identity map、reference graph。
+9. Publish：提交 dirty state、change event、summary report。
+10. Rollback：任一步失败时保留旧 workbook/source/object graph。
+
+默认提交规则：
+
+- safe 自动提交。
+- warning 可以继续 import/open；结构写回在 editor UI 中需要明确确认，在 CLI/CI 中由参数或 policy 控制。
+- error 允许 workbook 打开和 report 展示，但相关 asset/source 不可 convert，不可作为成功 hot reload/source switch 结果发布。
+- blocker 不写 workbook，不替换 runtime source，不清空数据，不发布 change event。
+
+### 14.6 默认 runtime no-GC 实现规则
+
+达到水位线后的 runtime 热路径默认不得产生 GC allocation。热路径包括：
+
+- `RuntimeDatabase.LoadAsset`。
+- key/path lookup。
+- object reference resolve。
+- dependency traversal。
+- converted bytes read。
+- source switch commit。
+- hot reload patch。
+- change event dispatch。
+
+实现默认选择：
+
+- 热路径不用 LINQ。
+- 热路径不用反射查字段；反射只能出现在 schema/import/bake/init 阶段。
+- 热路径不用闭包捕获、装箱、临时字符串拼接、按字段创建临时对象。
+- 对外遍历 API 提供 struct enumerator 或 caller-provided buffer 版本。
+- change event 默认 batch/coalesce 到预分配 `ChangeSet`。
+- key/path 在 import/bake 阶段完成 hash/intern/cache；runtime lookup 不构造新字符串。
+- 超过水位线时可以扩容，但必须记录 allocation report，并允许用户预热或 reserve。
+
+### 14.7 默认 source switch / hot reload 语义
+
+source switch 和 hot reload 默认都按 candidate snapshot 处理：
+
+- 先完整导入 candidate source。
+- 校验 schema hash、source hash、identity map、reference graph、validation blocker。
+- 在 commit 前完成必要 buffer reserve；如果触发水位线增长，本次 allocation 合法，但必须可观测。
+- commit 时优先 patch 已有 object，不重建可保持 identity 的对象。
+- 删除的 object 进入 missing/unloaded 语义，不让旧引用静默指向新对象。
+- 新增 object 分配 stable identity 后加入 index。
+- key/path 变化触发 moved/renamed 事件，不改变 row guid/local id。
+- 事件发布顺序固定为 removed、added、moved/renamed、property changed、dependency changed、table/source summary。
+
+如果 candidate 失败：
+
+- 旧 source 继续服务。
+- 旧 object graph 不变。
+- 不发布成功事件，只发布失败 report。
+- editor/development build 可以显示失败诊断；正式 runtime 默认只保留机器可读错误码和最小日志。
+
+### 14.8 未细化事项的默认解法
+
+当文档没有写到某个细节时，默认按下面顺序选择最自然方案：
+
+- 能保留用户 Excel 内容，就不重建整表。
+- 能用 metadata 匹配，就不用 header 文本猜。
+- 能用 schema 生成，就不要求策划手填结构信息。
+- 能事务提交，就不做半更新。
+- 能 patch object，就不重建 object。
+- 能复用 buffer，就不在热路径分配。
+- 能放在 adapter，就不污染核心。
+- 能生成 report，就不只抛异常字符串。
+- 能 deterministic 输出，就不依赖当前机器、当前时间、字典遍历顺序或 Excel 打开状态。
+
+## 15. 首批实现任务
+
+1. 扩展 schema options 设计：
+   - table display/sheet/version/export。
+   - field display/type shape/aliases/default/required/export/layout/description/header comment。
+   - enum schema：value id/name/display/aliases/deprecated/description/export token。
+   - simple struct schema：subfields、single cell format、expanded columns layout。
+   - reference nullable/ownership/delete policy。
+   - Unity adapter reference family：UnityResourceRef guid/main_asset_path/asset_type/path_display policy。
+   - validator severity/mode。
+2. 定义 workbook metadata sheet 格式：
+   - 使用 `__ExcelDB_Metadata`。
+   - workbook record：workbook guid、schema hash、layout hash、generator version、last successful import revision。
+   - table record：table id、schema name、current sheet name、table version、data start row、table kind/export policy。
+   - field record：table id、field id、field path、column index、value shape、parent field id、deprecated/reserved。
+   - row record：table id、row guid/local id、current row number、key snapshot、row revision、source hash/cell range hash。
 3. 定义 schema 生成 Excel 结构行的格式：
    - 中文名。
    - 字段名。
@@ -2173,6 +2535,11 @@ Phase 1 不应只叫 “schema options + workbook metadata”，而应该交付�
    - 导出端。
    - 规则。
    - 说明。
+   - 表头注释。
+   - 枚举可选值展示。
+   - 简单结构体单 cell / 多列展开规则。
+   - data region 默认从第 8 行开始。
+   - importer 不依赖 merged cells，merged cells 只作为显示样式。
    - 哪些行只读/受保护，哪些行允许业务备注。
    - 哪些辅助行/列不参与导入导出但必须保留。
 4. 做 schema compatibility 测试：
@@ -2185,6 +2552,9 @@ Phase 1 不应只叫 “schema options + workbook metadata”，而应该交付�
    - regenerate structure 保留不影响导入导出的策划辅助信息。
    - blocker 级结构错误不写回 workbook。
    - generation report 区分 safe/warning/error/blocker。
+   - enum 字段生成表头注释和 dropdown，重新生成后仍由 schema 控制。
+   - simple struct 字段在 single cell 与 expanded columns 两种布局下都能保留数据并正确导入导出。
+   - 只改 description/header comment 会更新 layout hash，但不导致 converted bytes schema hash 不兼容。
    - Unity resource path rename but same guid remains valid。
    - Unity resource missing/empty guid reports diagnostic。
    - incompatible converted bytes schema hash。
@@ -2193,28 +2563,38 @@ Phase 1 不应只叫 “schema options + workbook metadata”，而应该交付�
    - key 是人类可读定位。
    - key rename 不改变 object identity。
    - asset path 变化触发 moved/renamed 事件。
-6. 新建 `ExcelDbEngine` 和 `ExcelDbEditor` 两个项目或 namespace 边界。
-7. 定义 `Object`、`ScriptableObject`、`AssetDatabase` 的最小 API surface。
-8. 在现有 `ConfigDatabase` 上做 facade，不急着推翻内部实现。
-9. 做一个 CharacterConfig 的端到端测试：
+6. 定义 platform adapter / assembly 边界：
+   - `ExcelDbEngine`、schema、source、convert pipeline 不引用 UnityEngine / UnityEditor。
+   - Unity 2022.3 adapter 是首个 adapter，负责 UnityEditor 接入、UnityResourceRef、asset picker、Play Mode 调数和构建集成。
+   - 非 Unity adapter 通过 reference family、source、editor facade、validator、converter extension 扩展。
+7. 新建 `ExcelDbEngine`、`ExcelDbEditor`、Unity 2022.3 adapter 的项目或 namespace 边界。
+8. 定义 `Object`、`ScriptableObject`、`AssetDatabase` 的最小 API surface。
+9. 将现有 `ConfigDatabase` 的 transaction、undo、loader、dependency graph 作为内部实现资产接入新模型；对外 API 不泄漏旧表模型。
+10. 做一个 CharacterConfig 的端到端测试：
    - mount workbook
    - load asset at path
    - SerializedObject 修改 hp
    - undo
    - save
    - reread workbook
-10. 再做一个 repeated RowRef 的 SerializedProperty 测试。
-11. 做一个 Play Mode 热更新测试：
+11. 再做一个 repeated RowRef 的 SerializedProperty 测试。
+12. 做一个 Play Mode 热更新测试：
    - 使用 `ExcelDataSource` 启动
    - load 一个 `SkillConfig`
    - 模拟 Excel 修改伤害
    - hot reload
    - 断言同一个 object 实例读到新值
    - 断言 object changed 事件触发
-12. 做一个 Excel / converted bytes 热切换测试：
+13. 做一个 Excel / converted bytes 热切换测试：
    - 从 `ConvertedBytesDataSource` 启动
    - 切到 `ExcelDataSource`
    - 修改 Excel 并 hot reload
    - convert bytes
    - 切回 `ConvertedBytesDataSource`
    - 断言 identity、引用和 key index 一致
+14. 做 runtime GC allocation budget 测试：
+   - 初始化阶段的 source open、首次批量导入和水位线增长允许分配
+   - 预热到水位线后，`LoadAsset`、引用解析、key lookup、依赖遍历不产生 GC allocation
+   - 预热到水位线后，hot reload patch、source switch commit、change event 分发不产生 GC allocation
+   - Unity 2022.3 adapter 用 Unity profiler/GC allocation 测试验证
+   - 核心 runtime 用宿主无关 benchmark 或 allocation counter 验证
