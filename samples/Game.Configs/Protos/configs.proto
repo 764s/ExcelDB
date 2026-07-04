@@ -65,3 +65,30 @@ message LevelConfig {
   int32 hp_scale = 3;
   repeated exceldb.RowRef bosses = 4 [(exceldb.ref_table) = "CharacterConfig"];
 }
+
+message BehaviorTreeConfig {
+  option (exceldb.table) = {
+    kind: ASSET
+    id: 6
+  };
+
+  string key = 1 [(exceldb.key) = 1];
+  string title = 2;
+  exceldb.RowRef root = 3 [(exceldb.ref_table) = "BehaviorNodeConfig"];
+}
+
+message BehaviorNodeConfig {
+  option (exceldb.table) = {
+    kind: ASSET
+    id: 7
+  };
+
+  string key = 1 [(exceldb.key) = 1];
+  string display_name = 2;
+  string kind = 3;
+  string action = 4;
+  int32 x = 5;
+  int32 y = 6;
+  repeated exceldb.RowRef children = 7 [(exceldb.ref_table) = "BehaviorNodeConfig"];
+  exceldb.RowRef owner_tree = 8 [(exceldb.ref_table) = "BehaviorTreeConfig"];
+}

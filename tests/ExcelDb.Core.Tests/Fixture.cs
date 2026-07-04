@@ -39,6 +39,8 @@ public static class Fixture
     public const int BuffTable = 3;
     public const int BulletTable = 4;
     public const int LevelTable = 5;
+    public const int BehaviorTreeTable = 6;
+    public const int BehaviorNodeTable = 7;
 
     public static SchemaRegistry NewRegistry() => SchemaRegistry.FromFiles(ConfigsReflection.Descriptor);
 
@@ -93,12 +95,98 @@ public static class Fixture
             new(2, new LevelConfig { Stage = 1, Difficulty = "hard", HpScale = 250, Bosses = { Ref(CharacterTable, 2) } }),
         });
 
+        var behaviorTrees = new TableContent(new List<TableRecord>
+        {
+            new(1, new BehaviorTreeConfig
+            {
+                Key = "guard_ai",
+                Title = "Guard AI",
+                Root = Ref(BehaviorNodeTable, 1),
+            }),
+        });
+
+        var behaviorNodes = new TableContent(new List<TableRecord>
+        {
+            new(1, new BehaviorNodeConfig
+            {
+                Key = "root",
+                DisplayName = "Root Selector",
+                Kind = "Selector",
+                X = 420,
+                Y = 60,
+                OwnerTree = Ref(BehaviorTreeTable, 1),
+                Children = { Ref(BehaviorNodeTable, 2), Ref(BehaviorNodeTable, 5) },
+            }),
+            new(2, new BehaviorNodeConfig
+            {
+                Key = "patrol_sequence",
+                DisplayName = "Patrol",
+                Kind = "Sequence",
+                X = 210,
+                Y = 210,
+                OwnerTree = Ref(BehaviorTreeTable, 1),
+                Children = { Ref(BehaviorNodeTable, 3), Ref(BehaviorNodeTable, 4) },
+            }),
+            new(3, new BehaviorNodeConfig
+            {
+                Key = "has_patrol_route",
+                DisplayName = "Has Route",
+                Kind = "Condition",
+                Action = "HasPatrolRoute",
+                X = 90,
+                Y = 360,
+                OwnerTree = Ref(BehaviorTreeTable, 1),
+            }),
+            new(4, new BehaviorNodeConfig
+            {
+                Key = "move_to_waypoint",
+                DisplayName = "Move To Waypoint",
+                Kind = "Action",
+                Action = "MoveToWaypoint",
+                X = 330,
+                Y = 360,
+                OwnerTree = Ref(BehaviorTreeTable, 1),
+            }),
+            new(5, new BehaviorNodeConfig
+            {
+                Key = "attack_sequence",
+                DisplayName = "Attack",
+                Kind = "Sequence",
+                X = 650,
+                Y = 210,
+                OwnerTree = Ref(BehaviorTreeTable, 1),
+                Children = { Ref(BehaviorNodeTable, 6), Ref(BehaviorNodeTable, 7) },
+            }),
+            new(6, new BehaviorNodeConfig
+            {
+                Key = "can_see_enemy",
+                DisplayName = "Can See Enemy",
+                Kind = "Condition",
+                Action = "CanSeeEnemy",
+                X = 540,
+                Y = 360,
+                OwnerTree = Ref(BehaviorTreeTable, 1),
+            }),
+            new(7, new BehaviorNodeConfig
+            {
+                Key = "attack_target",
+                DisplayName = "Attack Target",
+                Kind = "Action",
+                Action = "AttackTarget",
+                X = 780,
+                Y = 360,
+                OwnerTree = Ref(BehaviorTreeTable, 1),
+            }),
+        });
+
         return new InMemoryTableLoader()
             .Add(new TableId(CharacterTable), characters)
             .Add(new TableId(SkillTable), skills)
             .Add(new TableId(BuffTable), buffs)
             .Add(new TableId(BulletTable), bullets)
-            .Add(new TableId(LevelTable), levels);
+            .Add(new TableId(LevelTable), levels)
+            .Add(new TableId(BehaviorTreeTable), behaviorTrees)
+            .Add(new TableId(BehaviorNodeTable), behaviorNodes);
     }
 
     public static ConfigDatabase Open(
@@ -122,4 +210,6 @@ public static class Fixture
     public static RowId Icenova => new(SkillTable, 2);
     public static RowId Burn => new(BuffTable, 1);
     public static RowId Pellet => new(BulletTable, 1);
+    public static RowId GuardTree => new(BehaviorTreeTable, 1);
+    public static RowId GuardRoot => new(BehaviorNodeTable, 1);
 }
