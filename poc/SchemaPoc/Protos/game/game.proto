@@ -1,0 +1,78 @@
+// PoC 输入:docs/modules/01-schema.md §4 的声明示例。
+syntax = "proto3";
+
+package game;
+
+import "exceldb/options.proto";
+
+option csharp_namespace = "SchemaPoc.GameProto";
+option (exceldb.defaults) = {
+  scalar_list_format: { join: { separators: ";" } }
+};
+
+message CommonHeader {                       // preset:组合 + 展开
+  string id = 1 [(exceldb.field) = { key: 1 }];
+  exceldb.LocalizedTextRef display_name = 2 [(exceldb.field) = { display_name: "显示名" }];
+  repeated string tags = 3 [(exceldb.field) = { labels: true, display_name: "标签" }];
+  bool enabled = 4 [(exceldb.field) = { display_name: "启用", default_value: "TRUE" }];
+}
+
+enum DamageType {
+  DAMAGE_TYPE_UNSPECIFIED = 0;
+  PHYSICAL = 1 [(exceldb.enum_value) = { display_name: "物理" }];
+  FIRE = 2;
+  FROST = 3;
+}
+
+message Cost        { int32 mp = 1; int32 hp = 2; }
+message CritSymbols { float base_damage = 1; float crit = 2; }     // expression 符号表
+message DropSymbols { int32 player_level = 1; }
+
+message DamageEffect { int32 amount = 1; }
+message DotEffect    { int32 amount_per_tick = 1; float duration = 2; }
+
+message SkillLevel {
+  int32 level = 1 [(exceldb.field) = { key: 1 }];
+  int32 required_exp = 2;
+}
+
+message DropEntry {
+  exceldb.RowRef item = 1 [(exceldb.field) = { ref_table: "ItemConfig" }];
+  int32 count = 2 [(exceldb.field) = { default_value: "1" }];
+  float weight = 3;
+  string condition = 4 [(exceldb.field) = { expression: { symbols_type: "game.DropSymbols", result: EXPR_BOOL } }];
+}
+
+message ItemStack {
+  exceldb.RowRef item = 1 [(exceldb.field) = { ref_table: "ItemConfig" }];
+  int32 count = 2 [(exceldb.field) = { default_value: "1" }];
+}
+
+message ItemConfig {
+  option (exceldb.table) = { kind: ASSET, id: 102, display_name: "物品" };
+
+  CommonHeader common = 1 [(exceldb.field) = { expand: EXPANDED_COLUMNS }];
+  int32 max_stack = 2 [(exceldb.field) = { display_name: "堆叠上限", default_value: "99", min: 1, max: 9999 }];
+}
+
+message SkillConfig {
+  option (exceldb.table) = { kind: ASSET, id: 101, display_name: "技能", validators: "skill_rules" };
+
+  CommonHeader common = 1 [(exceldb.field) = { expand: EXPANDED_COLUMNS }];
+  int32 damage = 2 [(exceldb.field) = { display_name: "伤害", header_comment: "基础伤害值", min: 0, max: 9999, default_value: "10" }];
+  DamageType damage_type = 3 [(exceldb.field) = { display_name: "伤害类型" }];
+  Cost cost = 4 [(exceldb.field) = { expand: EXPANDED_COLUMNS, display_name: "消耗" }];
+  repeated float tick_times = 5 [(exceldb.field) = { display_name: "跳字节奏" }];
+  repeated SkillLevel levels = 6 [(exceldb.field) = { display_name: "等级成长" }];
+  exceldb.RowRef next_rank = 7 [(exceldb.field) = { ref_table: "SkillConfig", display_name: "下一级" }];
+  exceldb.UnityResourceRef icon = 8 [(exceldb.field) = { display_name: "图标" }];
+  exceldb.Curve damage_by_level = 9 [(exceldb.field) = { display_name: "等级曲线" }];
+  string crit_formula = 10 [(exceldb.field) = { display_name: "暴击公式", expression: { symbols_type: "game.CritSymbols", result: EXPR_FLOAT } }];
+  repeated DropEntry drops = 11 [(exceldb.field) = { display_name: "掉落", weighted: { weight_field: 3, condition_field: 4 } }];
+  map<string, float> resist_decay = 12 [(exceldb.field) = { display_name: "抗性衰减" }];
+  repeated ItemStack rewards = 13 [(exceldb.field) = { display_name: "奖励", format: { join: { separators: ["#", "&"] } } }];
+  oneof effect {
+    DamageEffect effect_damage = 20;
+    DotEffect effect_dot = 21;
+  }
+}

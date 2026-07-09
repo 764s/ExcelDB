@@ -1,14 +1,6 @@
 <Solution>
-  <Folder Name="/samples/">
-    <Project Path="samples/Game.Configs/Game.Configs.csproj" />
-    <Project Path="samples/SkillEditor.Avalonia/SkillEditor.Avalonia.csproj" />
-    <Project Path="samples/SkillEditor.Cli/SkillEditor.Cli.csproj" />
-  </Folder>
-  <Folder Name="/src/">
-    <Project Path="src/ExcelDb.Core/ExcelDb.Core.csproj" />
-    <Project Path="src/ExcelDb.Excel/ExcelDb.Excel.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/ExcelDb.Core.Tests/ExcelDb.Core.Tests.csproj" />
+  <Folder Name="/poc/">
+    <Project Path="poc/SchemaPoc/SchemaPoc.csproj" />
+    <Project Path="poc/SchemaPoc.GeneratedCheck/SchemaPoc.GeneratedCheck.csproj" />
   </Folder>
 </Solution>

@@ -1,5 +1,7 @@
 # ExcelDB 精简计划(核推演版)
 
+> 模块化重推演进行中:schema 契约以 `docs/modules/01-schema.md` 为准(声明方式 = `.proto` + exceldb options,数字 id 身份);本文 §4 的 C# 特性方案作废,其余章节在对应模块文档落地前继续有效。
+
 ## 0. 度量口径
 
 - 荷载行:直接约束代码工件的行——需求项、类型定义、文件格式、算法步骤、API 签名、状态机、测试项。
@@ -225,7 +227,7 @@ interface IReferenceFamily { string Id { get; }  // "unity" 内置于 adapter
 1. 无 guid 的行 = 新行:导入时分配 guid(内存态),下次保存落盘;落盘前重复导入按 (key, 内容 hash) 在快照 pending 区匹配,保证稳定。
 2. guid 重复(整行复制):与快照 (key + 内容 hash) 匹配的行保留身份;都匹配或都不匹配时按行序首行保留;其余行按规则 1 作新行,报 `identity.duplicated`(warning)。
 3. 快照有、workbook 无的 guid = 删除行。
-4. guid 相同、key 变化 = 重命名(身份不变,发 Moved 事件);key 与他行冲突 → `key.duplicate`(error,两行都可加载,key 查找双双失效,保存/convert 被门禁)。
+4. guid 相同、key 变化 = 重命名(身份不变,发 Renamed 事件,asset path 随之变化再发 Moved);key 与他行冲突 → `key.duplicate`(error,两行都可加载,key 查找双双失效,保存/convert 被门禁)。
 5. guid cell 被策划清空:按 key 与快照匹配 → 恢复原 guid + `identity.recovered`(warning);匹配不到 → 按规则 1 作新行。
 
 AssetGuid ≡ row guid(guid v4 全局唯一,无派生运算)。asset path = `<workbook路径>/<表名>/<key>`,仅作展示与查找。
@@ -258,13 +260,14 @@ Mount(workbook) → 读 metadata → 校验 schema_hash → 列绑定(行2 对 F
 | base→theirs | base→mine | 结果 |
 | --- | --- | --- |
 | 无变化 | 无变化 | 不动 |
-| 变化 | 无变化 | 取 theirs,patch 内存对象,发 Changed |
+| 变化 | 无变化 | 取 theirs,patch 内存对象,发 PropertyChanged |
 | 无变化 | 变化 | 取 mine,保存时写回 |
 | 变化 | 变化,值相同 | 收敛,不算冲突 |
 | 变化 | 变化,值不同 | 冲突:进冲突集,行标记 Conflicted |
 
 - 行级增删与 cell 修改正交合并;同一行 theirs 删除 + mine 修改 = 冲突(整行粒度)。
-- 冲突解决 API:`ConflictSet.Resolve(cell, TakeMine|TakeTheirs)`;Unity adapter 提供对话框。存在未解决冲突时 SaveAssets 返回失败报告,不写盘。
+- 冲突记录:`ConflictRecord { ConflictId id; AssetIdentity assetIdentity; string fieldPath; }`,经 `AssetDatabase.GetConflicts` 枚举(6.7)。
+- 冲突解决:`AssetDatabase.ResolveConflict(id, ConflictResolutionAction.ReloadFromExcel|KeepEditorValue)`——前者弃本地改动取外部值,后者以外部为新 base 保留本地值;Unity adapter 提供对话框。存在未解决冲突时 SaveAssets 产出失败报告,不写盘。
 
 ### 6.4 SerializedObject / SerializedProperty
 
@@ -318,11 +321,13 @@ static class AssetDatabase {
     static T LoadAssetAtPath<T>(string path);        // path 见 5.3
     static string[] FindAssets(string filter);       // 支持 "t:Type"、"l:label"、名字子串、"ref:key" 四种
     static string[] GetLabels(Object asset); static void SetLabels(Object asset, string[] labels);
-    static string GUIDToAssetPath(GUID guid); static GUID AssetPathToGUID(string path);
-    static void CreateAsset(Object asset, string path);  // 新行,身份规则 1
+    static string GUIDToAssetPath(string guid); static string AssetPathToGUID(string path); // 同 Unity 主形态;GUID 结构体重载并存
+    static void CreateAsset(Object asset, string path);  // 新行,身份规则 1;path 末段为 key,单 string key 表上写 name 等价写 key
     static bool DeleteAsset(string path);            // 删行(保存时落盘)
     static bool RenameAsset(string path, string newKey); // 改 key,身份不变
     static void SaveAssets();                        // 6.5
+    static RuntimeQueryStatus GetConflicts(Span<ConflictRecord> buffer, out int count); // 6.3;Truncated 时 count 为所需总数
+    static bool ResolveConflict(ConflictId id, ConflictResolutionAction action);        // 6.3
     static event Action<ImportReport> workbookImported;
 }
 ```
@@ -347,22 +352,24 @@ readonly struct AssetIdentity { GUID guid; }                                    
 ```
 
 - resident object:每个 (table, row guid) 至多一个实例;切源/热载后同 guid 复用同实例(核 4 的运行时回报)。
-- 删除语义:实例 `IsMissing=true`,字段重置默认值,查询与 key 查找剔除,`Ref<T>.TryGet` 返回 false;同 guid 再出现 → 同实例复活,发 Changed。
+- 删除语义:实例 `IsMissing=true`,字段重置默认值,查询与 key 查找剔除,`Ref<T>.TryGet` 返回 false;同 guid 再出现 → 同实例复活,发 Added 与 PropertyChanged。
 
 ### 7.2 RuntimeDatabase API
 
 ```csharp
 static class RuntimeDatabase {
-    static void Open(IDataSource source);                    // 冷路径,初始化分配许可
+    static bool Open(IDataSource source);                    // 冷路径,初始化分配许可;失败 false + 报告
     static void Close();
-    static void SwitchDataSource(IDataSource source);        // 7.6
-    static void Refresh();                                   // 对当前源热载,7.5
+    static bool SwitchDataSource(IDataSource source);        // 7.6;失败保留旧源,返回 false
+    static bool Refresh();                                   // 对当前源热载,7.5;无变化返回 false
+    static void EnableHotReload();                           // watcher 生效;按 7.8 矩阵门禁,Release 调用即失败
+    static void DisableHotReload();
     static void Prewarm();                                   // 物化全部 resident objects
     static T LoadAsset<T>(string key);                       // 便捷路径,允许分配
     static bool TryGetAssetKey<T>(string key, out AssetKey k);
     static bool TryGetAsset<T>(AssetKey k, out T asset);     // 热路径,零分配
-    static RuntimeQueryStatus GetAssets<T>(T[] buffer, out int count); // 截断返回 Truncated
-    static event Action<ChangeSet> changed;
+    static RuntimeQueryStatus GetAssets<T>(Span<T> buffer, out int count); // Truncated 时 count 为所需总数
+    static event Action<ChangeSet> changed;                  // ChangeSet 仅派发期有效(7.3)
     static RuntimeMode mode { get; }
 }
 interface IDataSource { SourceInfo Open(); RowBlock ReadTable(int tableIndex); ulong SchemaHash { get; } }
@@ -371,12 +378,13 @@ interface IDataSource { SourceInfo Open(); RowBlock ReadTable(int tableIndex); u
 ### 7.3 ChangeSet
 
 ```csharp
-enum ChangeKind : byte { Added, Removed, Changed, Moved, Recreated, DependencyChanged }
-readonly struct ChangeEvent { ChangeKind kind; AssetKey key; AssetIdentity identity; Type runtimeType; }
-readonly ref struct ChangeSet { uint version; ReadOnlySpan<ChangeEvent> events; }
+enum ChangeKind : byte { Added, Removed, Moved, Renamed, Recreated, PropertyChanged, DependencyChanged }
+readonly struct ChangeEvent     { ChangeKind kind; AssetKey key; AssetIdentity assetIdentity; Type runtimeType; }
+readonly struct ChangeEventList { int Count { get; } ref readonly ChangeEvent this[int i] { get; } }  // 池化数组只读视图
+readonly struct ChangeSet       { uint version; ChangeEventList events; }
 ```
 
-- 事件缓冲双缓冲池化;派发在 publish point(主线程/宿主指定 tick),同一次事务内事件排序:Removed → Added → Moved → Changed → Recreated → DependencyChanged。
+- 事件缓冲双缓冲池化;`ChangeSet`/事件列表仅在派发调用栈内有效,跨帧持有必须拷贝。派发在 publish point(主线程/宿主指定 tick),同一次事务内事件排序:Removed → Added → Moved → Renamed → Recreated → PropertyChanged → DependencyChanged。
 - DependencyChanged 覆盖变更行的反向依赖传递闭包(池化 visited 栈)。
 
 ### 7.4 converted bytes 格式
@@ -430,7 +438,7 @@ Excel 源与 bytes 源共用 guid/rev/schema_hash,因此双向切换语义对称
 | 能力 | EditorAuthoring | EditorPlayDebug | Development | Release |
 | --- | --- | --- | --- | --- |
 | ExcelDataSource | yes | yes | opt-in | no |
-| BytesDataSource | yes | yes | yes | yes |
+| ConvertedBytesDataSource | yes | yes | yes | yes |
 | hot reload / 切源 | yes | yes | opt-in | no(仅显式 Open 新 bytes)|
 | AssetDatabase 写回 | yes | yes(经 editor API)| no | no |
 | SerializedObject 编辑 | yes | yes | no | no |
@@ -471,11 +479,11 @@ readonly struct UnityRef { UnityGuid Guid { get; } string MainAssetPath { get; }
 ### 8.3 LocalizedTextRef
 
 ```csharp
-readonly struct LocalizedTextRef { string Key { get; } }
+readonly struct LocalizedTextRef { string Key { get; } string Resolve(); }
 ```
 
 - cell = 文本 key token;校验:key 存在于项目指定 text table(普通 ExcelDB 表)或 provider 回调。
-- runtime 经 `ILocalizedTextProvider`(宿主注册)解析;无 provider 或缺 key → 返回 key 本身 + 首次一次 warning;解析结果 interned,重复读取零分配。
+- `Resolve()` 经 `ILocalizedTextProvider`(宿主经 `SchemaRegistry.SetLocalizedTextProvider` 注册)解析;无 provider 或缺 key → 返回 key 本身 + 首次一次 warning;解析结果 interned,重复读取零分配。
 
 ### 8.4 自定义引用族
 
@@ -517,7 +525,7 @@ CI 基线 = `lint + check + convert` 三连 + 测试套件(含 no-GC 门禁)。c
 - picker:内部引用搜索窗(FindAssets 驱动);UnityRef 用 ObjectField 桥接,写回 guid+path。
 - 冲突对话框:6.3 冲突集的 TakeMine/TakeTheirs 界面。
 - Play Mode:进入时按项目设置选 ExcelDataSource 或最近 convert 的 bytes;domain reload 后自动重开;Excel 保存 → 热载 → Game 视图即时生效。
-- 构建:`IPreprocessBuildWithReport` 钩子跑 convert,产物进 `StreamingAssets/ExcelDb/`;Release 运行时 `Open(new BytesDataSource(路径))`。
+- 构建:`IPreprocessBuildWithReport` 钩子跑 convert,产物进 `StreamingAssets/ExcelDb/`;Release 运行时 `Open(new ConvertedBytesDataSource(路径))`。
 - 菜单:Mount/Refresh/Generate/Convert/打开报告。
 
 ## 12. 测试与验收
@@ -537,7 +545,7 @@ CI 基线 = `lint + check + convert` 三连 + 测试套件(含 no-GC 门禁)。c
 
 ## 13. 施工顺序
 
-1. M1 Core 竖切:schema 特性 + 源生成器 + descriptor + bytes 格式 + BytesDataSource + RuntimeDatabase 读 + 测试 1/2/7(读取部分)。
+1. M1 Core 竖切:schema 特性 + 源生成器 + descriptor + bytes 格式 + ConvertedBytesDataSource + RuntimeDatabase 读 + 测试 1/2/7(读取部分)。
 2. M2 Excel 导入:xlsx 读 + 列绑定 + 身份 + 快照 + 校验 + 测试 3。
 3. M3 编辑闭环:AssetDatabase + SerializedObject/Property + Undo/dirty + 补丁写回 + 测试 5。
 4. M4 并发与热度:三方合并 + watcher + hot reload + 切源 + 测试 4/7(其余)。
@@ -552,7 +560,7 @@ CI 基线 = `lint + check + convert` 三连 + 测试套件(含 no-GC 门禁)。c
 
 | 分类 | 章节 | 非空行 |
 | --- | --- | --- |
-| 荷载 | 1、3-12 | 400 |
+| 荷载 | 1、3-12 | 403 |
 | 非荷载 | 0、2、13、附录 A | 25 |
 
-实测:总计 425 行,荷载占比 94.1%;裁剪理由 18 条外置于 `exceldb-cuts-adr.md`,不占预算。
+实测:总计 428 行,荷载占比 94.2%;裁剪理由 18 条外置于 `exceldb-cuts-adr.md`,不占预算。

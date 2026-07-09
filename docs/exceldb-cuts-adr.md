@@ -11,6 +11,7 @@
 5. 签名工件/信任链/分层 CompositeDataSource → 投机需求;替代:`IDataSource` 接口留作扩展点(7.2)。
 6. 1100 行报告格式/报告 hash/投影分账 → 替代:单一 `Diagnostic` 结构 + json 报告(9)。
 7. id 分配注册表/tombstone/保留区 → 数字 id 整体取消;字段身份 = 名字 + `[FormerName]`;复用检查 = 对上次快照的 lint(6.6)。
+   修订(2026-07-08 评审):数字 id 恢复——schema 声明回归 proto 后,表/字段/枚举值/variant 身份 = proto number,`[FormerName]` 机制废弃;复用防护 = proto `reserved` + lint(modules/01-schema.md §1/§5)。独立的 id 分配注册表子系统仍维持裁剪。
 8. schema-discriminated polymorphic payload / arbitrary JSON legacy codec → union(稳定 variant token)与 `ICellCodec` 已覆盖其需求;维持裁剪。
    修订(2026-07-06 评审):本条初版曾把 LocalizedTextRef/expression/weighted/curve/label/preset/union/map 八项能力家族一并降级为 samples;评审决定恢复为一等核心能力,规格见精简计划 4.7,多态 payload 与 JSON legacy 维持裁剪。
 9. canonical value 四态(missing/default/explicit_null/explicit_value)→ 二态:空 = 默认(可空型为 null),非空 = 值(4.3)。
@@ -21,6 +22,7 @@
 14. 表头上方 helper 行 → 策划备注走单元格批注、辅助列、自由 sheet;表头区域固定 3 行(5.1)。
 15. `boxedValue`/`managedReferenceValue`/gradient 等分配型投影 → 不提供;drawer 直接操作具体类型属性(6.4)。
 16. proto schema 源(options.proto)→ 与"Unity 使用手感"核冲突(异质工具链,Unity 用户以 C# 类定义资产);现有 `ConfigDatabase`/`ExcelTableLoader` 按件拆用(UndoStack、DependencyGraph、xlsx IO),对外模型废弃(4.1、13)。
+   修订(2026-07-08 评审):本条裁剪撤销——声明方式回归 proto(原计划 7.6/14.23 的首发默认),数字 number 身份优于名字身份,Unity 手感由生成的 C# 类型与 facade 承载,与声明层解耦;规格见 modules/01-schema.md。`ConfigDatabase` 对外模型废弃的结论不变。
 17. 操作事务通用框架(OperationPlan/affected set/side-effect ledger)→ 各危险操作直接实现同一"plan → report → apply-or-abort"三段式约定,共享 `OperationReport` 类型(9),不做框架。
 18. 旧计划 14.6/14.14/14.16 等章节的穷举式子协议(报告生命周期、watcher 调度状态机、property path 与 cell 映射的逐案枚举)→ 收敛为单页规则 + codegen 携带映射(6.4、6.8);逐案行为由测试固定,不由文档穷举。
 

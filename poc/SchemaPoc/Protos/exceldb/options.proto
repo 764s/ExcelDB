@@ -1,0 +1,114 @@
+// ExcelDB options v2 — 按 docs/modules/01-schema.md §2 落地的 PoC 版本。
+syntax = "proto3";
+
+package exceldb;
+
+import "google/protobuf/descriptor.proto";
+
+option csharp_namespace = "ExcelDb.Protocol";
+
+// ---- 值类型:字段可直接使用,类型即 value shape ----
+message RowRef           { int32 table = 1; int32 id = 2; }
+message UnityResourceRef { string guid = 1; string main_asset_path = 2; }
+message LocalizedTextRef { string key = 1; }
+message CurvePoint       { float x = 1; float y = 2; optional float in_tangent = 3; optional float out_tangent = 4; }
+message Curve            { repeated CurvePoint points = 1; }
+
+// 表的语义类别:资产表还是嵌入形状。
+enum TableKind {
+  TABLE_KIND_UNSPECIFIED = 0;   // 非法:挂 table option 必须显式选 kind(XDB015)
+  ASSET = 1;                    // 一行 = 一个有身份的资产
+  EMBEDDED = 2;                 // 无身份共享形状
+}
+
+// message 字段的物理布局。
+enum ExpandMode {
+  EXPAND_AUTO = 0;              // 确定性物化:纯标量/enum → 单 cell;含嵌套/repeated/map/引用 → 展开列
+  SINGLE_CELL = 1;
+  EXPANDED_COLUMNS = 2;
+}
+
+// 被引用行删除时,持有方 RowRef 字段的完整性策略。
+enum RefDeletePolicy {
+  REF_DELETE_UNSPECIFIED = 0;   // 等价 BLOCK
+  BLOCK = 1;
+  SET_NULL = 2;
+  CASCADE = 3;
+}
+
+// 表达式结果类型。
+enum ExprResult {
+  EXPR_FLOAT = 0;
+  EXPR_INT = 1;
+  EXPR_BOOL = 2;
+}
+
+// 数据出包策略。
+enum ExportPolicy {
+  EXPORT_DEFAULT = 0;           // 继承上级
+  EXPORT_ALL = 1;
+  EDITOR_ONLY = 2;
+}
+
+message TableOpts {
+  TableKind kind = 1;
+  int32 id = 2;                     // 表稳定身份
+  repeated string implements = 3;   // 引用组
+  string display_name = 4;
+  string sheet_name = 5;            // 默认 = message 名
+  ExportPolicy export = 6;
+  repeated string validators = 7;   // 行级校验器 id,宿主代码注册
+}
+
+message ExpressionOpts { string symbols_type = 1; ExprResult result = 2; }
+message WeightedOpts   { int32 weight_field = 1; int32 condition_field = 2; }
+message ChildTableOpts { string sheet_name = 1; }
+
+// 单格式声明器。
+message JoinFormat  { repeated string separators = 1; }
+message NamedFormat { string pair_separator = 1; string kv_separator = 2; }
+message CellFormat {
+  oneof kind {
+    JoinFormat join = 1;
+    NamedFormat named = 2;
+    string codec = 3;
+  }
+  repeated CellFormat legacy = 4;   // 迁移窗口:仅供解析的旧格式
+}
+
+message SchemaDefaults {
+  CellFormat struct_format = 1;
+  CellFormat scalar_list_format = 2;
+  CellFormat map_format = 3;
+}
+
+message FieldOpts {
+  int32 key = 1;
+  string display_name = 2;
+  string header_comment = 3;
+  repeated string aliases = 4;
+  bool required = 5;
+  string default_value = 6;
+  optional double min = 7;
+  optional double max = 8;
+  string regex = 9;
+  bool unique = 10;
+  string ref_table = 11;
+  string ref_group = 12;
+  RefDeletePolicy delete_policy = 13;
+  ExpandMode expand = 14;
+  ChildTableOpts child_table = 15;
+  bool labels = 16;
+  CellFormat format = 17;
+  ExpressionOpts expression = 18;
+  WeightedOpts weighted = 19;
+  ExportPolicy export = 20;
+  string map_key_enum = 21;
+}
+
+message EnumValueOpts { string display_name = 1; repeated string aliases = 2; }
+
+extend google.protobuf.MessageOptions   { TableOpts table = 50001; }
+extend google.protobuf.FieldOptions     { FieldOpts field = 50020; }
+extend google.protobuf.EnumValueOptions { EnumValueOpts enum_value = 50030; }
+extend google.protobuf.FileOptions      { SchemaDefaults defaults = 50040; }
