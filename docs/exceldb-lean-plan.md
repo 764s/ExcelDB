@@ -1,6 +1,6 @@
 # ExcelDB 精简计划(核推演版)
 
-> 模块化重推演进行中:schema 契约以 `docs/modules/01-schema.md` 为准(声明方式 = `.proto` + exceldb options,数字 id 身份);本文 §4 的 C# 特性方案作废,其余章节在对应模块文档落地前继续有效。
+> 模块化重推演进行中:schema 契约以 `docs/modules/01-schema.md` 为准(声明方式 = `.proto` + exceldb options,数字 id 身份),本文 §4 的 C# 特性方案作废;AssetDatabase 门面以 `docs/modules/02-assetdatabase.md` 为准,本文 §6.7 作废;生成类型为普通 C# 类,不派生 `Object`/`ScriptableObject`(M2 D4/Δ11),本文 §7.1 的基类模型与核 1 所列 `Object`/`ScriptableObject` facade 照此修订(resident/missing 语义保留,承载方式待模块 5);其余章节在对应模块文档落地前继续有效。
 
 ## 0. 度量口径
 

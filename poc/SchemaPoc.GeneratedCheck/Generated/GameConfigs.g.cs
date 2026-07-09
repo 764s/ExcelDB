@@ -80,14 +80,14 @@ namespace Game.Configs
     }
 
     /// <summary>物品(表 id 102)</summary>
-    public partial class ItemConfig : ScriptableObject
+    public partial class ItemConfig
     {
         public CommonHeader Common = new();
         public int MaxStack = 99;
     }
 
     /// <summary>技能(表 id 101)</summary>
-    public partial class SkillConfig : ScriptableObject
+    public partial class SkillConfig
     {
         public CommonHeader Common = new();
         public int Damage = 10;

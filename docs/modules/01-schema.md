@@ -1,6 +1,6 @@
 # 模块 1:Schema 契约
 
-状态:本文是逐模块重推演的第 1 篇,取代 `exceldb-lean-plan.md` §4 的 C# 特性方案。声明方式 = `.proto` + exceldb options;生成的 C# 类型是消费层投影,不是事实源。后续模块引用本文记作 M1§x。
+状态:本文是逐模块重推演的第 1 篇,取代 `exceldb-lean-plan.md` §4 的 C# 特性方案。声明方式 = `.proto` + exceldb options;生成的 C# 类型是消费层投影,不是事实源。后续模块引用本文记作 M1§x。编号顺延(2026-07-09):第 2 篇为 AssetDatabase 门面(`02-assetdatabase.md`),本文所称模块 2/3/4/5(workbook 与身份/导入与编辑/运行时/兼容)现为模块 3/4/5/6。
 
 ## 1. 声明方式与身份规则
 
@@ -30,7 +30,7 @@ message CurvePoint       { float x = 1; float y = 2; optional float in_tangent =
 // 表的语义类别:资产表还是嵌入形状(判定规则见 §3)。
 enum TableKind {
   TABLE_KIND_UNSPECIFIED = 0;   // 非法:挂 table option 必须显式选 kind(XDB015)
-  ASSET = 1;                    // 一行 = 一个有身份的资产;须有表 id 与 key,派生 ScriptableObject
+  ASSET = 1;                    // 一行 = 一个有身份的资产;须有表 id 与 key,生成普通 C# 类(M2 Δ11)
   EMBEDDED = 2;                 // 无身份共享形状;仅为挂表级 option(校验器/展示名)而登记,禁 id/key
 }
 
@@ -184,7 +184,7 @@ kind 细则:
 TableKind 判定:
 
 - 不挂 `(exceldb.table)` 的 message = 匿名 embedded 形状(默认态):展开列结构体、单 cell 结构体、子表元素、oneof variant payload、preset 字段组、expression 符号表都属于此类;无身份、无 sheet 主权、不可作 RowRef 目标、不可独立加载,codegen 生成普通 class/struct。
-- `kind: ASSET`:一行 = 一个资产;必须有表 id 与 key 字段;拥有 sheet、行身份锚(模块 2)、asset path,可被 RowRef 引用、可按 key 加载、进入 FindAssets/依赖图/ChangeSet;codegen 派生 `ScriptableObject`。
+- `kind: ASSET`:一行 = 一个资产;必须有表 id 与 key 字段;拥有 sheet、行身份锚(模块 2)、asset path,可被 RowRef 引用、可按 key 加载、进入 FindAssets/依赖图/ChangeSet;codegen 生成普通 C# 类,资产语义由注册引导与 facade 承载,不派生库基类(M2 D4/Δ11)。
 - `kind: EMBEDDED`:显式登记的共享形状,仅当形状需要表级 option(如子表元素的 `validators`、`display_name`)时声明;不得携带 id/key。
 - 挂 option 必须显式选 kind;`UNSPECIFIED` 或 EMBEDDED 带 id/key → XDB015。
 - 子表行的 guid 锚是 merge/热载的机器身份,不是资产身份;子表元素需要被外部引用时,应将元素表提升为 ASSET。
@@ -315,7 +315,7 @@ XDB018 format legacy 项嵌套 legacy,或 legacy 与 canonical 物化身份相�
 
 生成器消费 SchemaDescriptor(不使用 protoc 的 C# 插件),每个 ASSET/EMBEDDED message 生成:
 
-1. 强类型类:ASSET 表派生 `ExcelDbEngine.ScriptableObject`,EMBEDDED 为普通类/结构;C# 成员 PascalCase,绑定表记录 field id ↔ C# 成员 ↔ property path(= proto 字段名)。
+1. 强类型类:ASSET 与 EMBEDDED 均为普通 C# 类/结构,无库基类与 `name`/`GetInstanceID` 成员(库定位 Unity 无关,Unity 手感止于 facade 用法,M2 D4/Δ11);资产身份经注册引导(产物 7)由库侧维护;C# 成员 PascalCase,绑定表记录 field id ↔ C# 成员 ↔ property path(= proto 字段名)。
 2. cell 解析器与写出器:canonical 字面量 ↔ 字段值,span 上直解,不用反射;结构文法经声明器——内置 join/named 按物化参数内联生成,codec kind 走 `ICellFormat` 注册接口。
 3. bytes 访问器:按列目录偏移直读(格式在模块 4)。
 4. patcher:实例字段级 diff 与就地覆写(hot reload 用)。

@@ -50,9 +50,9 @@ public static class CSharpEmitter
 
     static void EmitClass(StringBuilder sb, SchemaDesc schema, TableDesc msg, bool isAsset)
     {
-        var baseType = isAsset ? " : ScriptableObject" : "";
+        // ASSET 与 EMBEDDED 均为普通 C# 类:库定位 Unity 无关,资产语义经注册引导承载(M2 D4/Δ11)。
         sb.AppendLine($"    /// <summary>{msg.DisplayName}{(isAsset ? $"(表 id {msg.Id})" : "")}</summary>");
-        sb.AppendLine($"    public partial class {msg.Name}{baseType}");
+        sb.AppendLine($"    public partial class {msg.Name}");
         sb.AppendLine("    {");
         foreach (var f in msg.Fields)
             EmitMember(sb, schema, f);
@@ -101,7 +101,7 @@ public static class CSharpEmitter
                 var t = f.ExprResult switch { "ExprInt" => "int", "ExprBool" => "bool", _ => "float" };
                 return ($"Expression<{t}>", "");
             case ValueShape.InternalRef:
-                return (f.RefTable.Length > 0 ? $"Ref<{f.RefTable}>" : "Ref<ExcelDbEngine.Object>", "");
+                return (f.RefTable.Length > 0 ? $"Ref<{f.RefTable}>" : "Ref<object>", "");
             case ValueShape.UnityRef: return ("UnityRef", "");
             case ValueShape.LocalizedRef: return ("LocalizedTextRef", "");
             case ValueShape.Curve: return ("Curve", " = new()");

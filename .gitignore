@@ -59,6 +59,9 @@ ExportedObj/
 # Unity3D generated file on crash reports
 sysinfo.txt
 
+# Office/WPS 打开 xlsx 时的锁文件
+~$*
+
 # FlowVM keeps hand-written project files for local tests/benchmarks.
 !src/**/*.csproj
 !samples/**/*.csproj

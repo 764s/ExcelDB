@@ -4,21 +4,8 @@ using System.Collections.Generic;
 
 namespace ExcelDbEngine
 {
-    public class Object
-    {
-        public string name;
-        int _instanceId;
-        static int _next;
-        public int GetInstanceID() => _instanceId != 0 ? _instanceId : _instanceId = ++_next;
-        public bool IsMissing { get; internal set; }
-    }
-
-    public class ScriptableObject : Object
-    {
-        public static T CreateInstance<T>() where T : ScriptableObject, new() => new T();
-    }
-
-    public readonly struct Ref<T> where T : Object
+    // 无 Object/ScriptableObject 基类:生成类是普通 C# 类,资产语义由库侧注册表承载(M2 D4/Δ11)。
+    public readonly struct Ref<T> where T : class
     {
         public readonly string Key;
         public Ref(string key) => Key = key;
