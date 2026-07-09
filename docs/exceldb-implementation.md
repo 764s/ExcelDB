@@ -1,6 +1,6 @@
 # ExcelDB 实施文档
 
-> 模块化重推演进行中:schema 声明方式已改为 proto(`docs/modules/01-schema.md`),本文 §1 的 CodeGen 工程形态、§2.5、§3-M1 与 §8.1 示例将随模块文档逐步修订,修订前以模块文档为准;AssetDatabase 门面已定稿(`docs/modules/02-assetdatabase.md`),§3-M3 3.1 所引 P§6.7 与 §8.3 样例照此修订;生成类型为普通 C# 类,不派生 `ScriptableObject`(M2 D4/Δ11),§8 各样例的基类声明、`CreateInstance` 与 `name` 用法照此修订。
+> 模块化重推演进行中:schema 声明方式已改为 proto(`docs/modules/01-schema.md`),本文 §1 的 CodeGen 工程形态、§2.5、§3-M1 与 §8.1 示例将随模块文档逐步修订,修订前以模块文档为准;AssetDatabase 门面已定稿(`docs/modules/02-assetdatabase.md`),§3-M3 3.1 所引 P§6.7 与 §8.3 样例照此修订;生成类型为普通 C# 类,不派生 `ScriptableObject`(M2 D4/Δ11),§8 各样例的基类声明、`CreateInstance` 与 `name` 用法照此修订;工作流已定稿(`docs/modules/03-workflow.md`,M3):§6 CI 序列追加生成代码新鲜度与评审工件(check + diff 报告)两道门禁、CI check 下 schema.drift 判 error(M3§9),CLI 增 `diff` 子命令(M3§8),§8.5 操作序列以 M3 WF3-WF5 为准。
 
 ## 0. 口径
 

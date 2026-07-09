@@ -25,5 +25,6 @@
    修订(2026-07-08 评审):本条裁剪撤销——声明方式回归 proto(原计划 7.6/14.23 的首发默认),数字 number 身份优于名字身份,Unity 手感由生成的 C# 类型与 facade 承载,与声明层解耦;规格见 modules/01-schema.md。`ConfigDatabase` 对外模型废弃的结论不变。
 17. 操作事务通用框架(OperationPlan/affected set/side-effect ledger)→ 各危险操作直接实现同一"plan → report → apply-or-abort"三段式约定,共享 `OperationReport` 类型(9),不做框架。
 18. 旧计划 14.6/14.14/14.16 等章节的穷举式子协议(报告生命周期、watcher 调度状态机、property path 与 cell 映射的逐案枚举)→ 收敛为单页规则 + codegen 携带映射(6.4、6.8);逐案行为由测试固定,不由文档穷举。
+19. xlsx canonical snapshot / diff / review artifact 家族(旧计划 12.2.3:快照入库、快照同步 CI、merge 命令、conflict artifact、修复工具族)→ 部分恢复(2026-07-10 模块 3):单一 `exceldb diff` 命令(只读导入 + guid 对齐 + canonical 值比较,modules/03-workflow.md §8)承担版本冲突对账与 PR 评审工件;快照入库、三方 merge 命令与独立修复工具族维持裁剪——身份修复与 rename/copy 诊断已由导入管线内建(5.3),版本冲突走"整文件二选一 + diff 对账重做"剧本(M3§8)。
 
 裁剪总原则:机制只有在至少一个核的强制链上才保留;防御性基建(注册表、权限、签名、分账)在出现真实攻击面或真实多租户之前不建;"几乎不会发生"的分支给 blocker + 人工处理,不给自动化子系统。
