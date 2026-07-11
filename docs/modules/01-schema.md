@@ -1,14 +1,29 @@
 # 模块 1:Schema 契约
 
-状态:本文是逐模块重推演的第 1 篇,取代 `exceldb-lean-plan.md` §4 的 C# 特性方案。声明方式 = `.proto` + exceldb options;生成的 C# 类型是消费层投影,不是事实源。后续模块引用本文记作 M1§x。编号顺延(2026-07-09/07-10/07-11):第 2 篇为 AssetDatabase 门面(`02-assetdatabase.md`),第 3 篇为工作流(`03-workflow.md`),第 4 篇为集成工具(`04-integration-tools.md`);本文所称模块 2/3/4/5(workbook 与身份/导入与编辑/运行时/兼容)现为模块 5/6/7/8。
+状态：Accepted Design。本文是 M1 Schema 领域的唯一 owner；跨模块权威规则、状态和开放决策见 [`docs/spec/README.md`](../spec/README.md)。声明方式 = `.proto` + exceldb options；`.proto` 可由程序直接编辑，也可由交互向导事务性维护，不要求手写；生成的 C# 类型是消费层投影，不是事实源。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
 
 ## 1. 声明方式与身份规则
 
-- 事实源 = 手写 `.proto` 文件(升级现有 `exceldb/options.proto`)。
-- 结构身份全部数字化,proto 原生:表身份 = `(exceldb.table).id`(手工分配,发布后不可变);字段身份 = proto field number;枚举值身份 = enum number;union variant 身份 = oneof 内 field number。
+- 事实源 = 版本化 `.proto` 文件(使用 `exceldb/options.proto`);文本编辑器和交互向导只是维护同一事实源的两个入口,向导状态、缓存与生成的 descriptor/C# 均不得补充结构语义。
+- 结构身份全部数字化,proto 原生:表身份 = `(exceldb.table).id`(由程序指定或 Schema Tooling 分配/确认并显式写入 proto,发布后不可变);字段身份 = proto field number;枚举值身份 = enum number;union variant 身份 = oneof 内 field number。
+- live 与 retired 表共享同一个 table id 唯一域;retired 声明是版本化 proto 内的永久 tombstone,其 id 与仍存活 id 一样占用且永不释放。Schema Tooling 建议新 table id 时必须同时排除 live 与 retired 集合,不得依赖 cache 或仅扫描生成代码。
 - 名字(message 名、字段名、枚举名)是展示与绑定信息,可自由重命名;身份不变即兼容。删除过的 number 用 proto `reserved` 声明,复用即 lint error。
 - 展示信息(display_name、header_comment)不参与结构身份,也不进 schema_hash。
 - 生成的 C# 类不是第二事实源:工具与二进制只比对 schema_hash;手改生成代码无效。
+
+### 1.1 结构化创建与维护
+
+- Schema Tooling 必须提供结构化 mutation primitive,供交互向导表达建表、增删改字段/枚举/variant 与 option 变更；具体提示、页面、命令名和 Project 编排归 M4,不由本文规定。
+- 每次 mutation 以当前 `.proto` 与用户确认的结构意图为输入,先在暂存区形成候选 `.proto`；rename 必须保留数字身份,删除必须写入相应 `reserved`,破坏性变更仍受 M8 兼容与迁移门禁约束。
+- 候选必须走 §5 同一 parser、SchemaCompiler、lint 与 codegen 管线。全部成功后才以原子替换提交 `.proto` 与本次生成的 descriptor/C#/`RuntimeSchemaRegistry`；任一步失败均不得改动原 `.proto` 或发布部分新派生物。
+- 交互会话可以保存非权威的恢复进度,但删除全部会话状态与 cache 后,仅凭版本化 `.proto` 必须重建字节相同的 descriptor、C# 与 `RuntimeSchemaRegistry`。直接编辑和向导产生相同 `.proto` 时,下游结果必须完全相同。
+
+### 1.2 表退役与永久 tombstone
+
+- 退役是 live ASSET 表的单向生命周期转换:`live → retired`,没有复活边。只有曾作为 live schema 发布、已有稳定 table id 的 ASSET message 才能设置 `retired = true`;新建即 retired、匿名/EMBEDDED retired、无有效 id retired 均非法。
+- 退役提交必须保留原 proto message 声明与 `(exceldb.table).id`,只把其状态变为 retired。该 message 此后必须永久留在版本化 proto;删除 tombstone、清除 retired 标记、改 id 或让任何 live/retired 表复用其 id 都是 blocker。message rename 仍遵守 §1 的数字身份规则:保 id 即兼容 rename,不会复活该表。
+- retired message 只承担身份墓碑职责:不要求对应 workbook/sheet 或 key 数据,不产生 live C# 数据类型、运行时注册项或 converted bytes 表。它在 canonical descriptor 中物化为按 id 确定序的 retired tombstone,并永久参与 schema_hash。
+- 当前 schema 的静态 lint 负责 retired 形态与 live+retired id 唯一性;发布转换 lint 还必须把候选 descriptor 与显式提供的 previous published descriptor 比较,证明“先前 live → 当前 retired”或“先前 retired → 当前同一 tombstone”。previous 只用于历史转换判定,不得替代从当前 schemaDir 编译 candidate;其选择与兼容报告归 M8。
 
 ## 2. options 契约(exceldb/options.proto v2)
 
@@ -21,7 +36,7 @@ import "google/protobuf/descriptor.proto";
 option csharp_namespace = "ExcelDb.Protocol";
 
 // ---- 值类型:字段可直接使用,类型即 value shape ----
-message RowRef           { int32 table = 1; int32 id = 2; }   // 内部引用;cell token 与解析规则在模块 2/3 定
+message RowRef           { int32 table = 1; int32 id = 2; }   // 内部引用;身份关系、cell token 与解析规则由 M5/M6 收口(总纲 OD1)
 message UnityResourceRef { string guid = 1; string main_asset_path = 2; }  // guid 为身份,path 为展示
 message LocalizedTextRef { string key = 1; }
 message Curve            { repeated CurvePoint points = 1; }
@@ -30,7 +45,7 @@ message CurvePoint       { float x = 1; float y = 2; optional float in_tangent =
 // 表的语义类别:资产表还是嵌入形状(判定规则见 §3)。
 enum TableKind {
   TABLE_KIND_UNSPECIFIED = 0;   // 非法:挂 table option 必须显式选 kind(XDB015)
-  ASSET = 1;                    // 一行 = 一个有身份的资产;须有表 id 与 key,生成普通 C# 类(M2 Δ11)
+  ASSET = 1;                    // live:须有表 id/key并生成 C#;retired:仅保留稳定 id tombstone
   EMBEDDED = 2;                 // 无身份共享形状;仅为挂表级 option(校验器/展示名)而登记,禁 id/key
 }
 
@@ -71,6 +86,7 @@ message TableOpts {
   string sheet_name = 5;            // 默认 = message 名
   ExportPolicy export = 6;
   repeated string validators = 7;   // 行级校验器 id,宿主代码注册
+  bool retired = 8;                 // 已发布 ASSET 的永久 table-id tombstone;单向不可逆
 }
 
 message ExpressionOpts { string symbols_type = 1; ExprResult result = 2; }
@@ -133,6 +149,7 @@ option 枚举语义(零值即默认):
 - `RefDeletePolicy`:挂在持有方 RowRef 字段。`UNSPECIFIED` ≡ `BLOCK`(拒绝删除仍被引用的目标,报告列出引用者);`SET_NULL` 目标删除时清格 + dirty;`CASCADE` 持有行级联删除(递归),删除计划先列影响集再 commit。评估顺序:闭包内先查 BLOCK,有则整体拒绝。Excel 直删行走同一策略:BLOCK 表现为 `ref.dangling` error 门禁保存/convert,SET_NULL/CASCADE 自动改数 + warning + dirty;运行时热载一律 Missing 语义,不走本策略。
 - `ExprResult`:表达式结果类型是 schema 契约,不从 cell 内容推断;决定生成的 `Expression<T>` 类型、字节码返回槽与 `Eval` 签名,导入/convert 期逐行类型检查。零值 = `EXPR_FLOAT`。
 - `ExportPolicy`:字段级 `EXPORT_DEFAULT` 继承表级,表级 `EXPORT_DEFAULT` ≡ `EXPORT_ALL`。`EDITOR_ONLY` 不进 converted bytes 且不生成运行时读取面(保证 Excel 源与 bytes 源运行时行为一致);整表 EDITOR_ONLY = 策划辅助表,convert 整体跳过。key 字段 EDITOR_ONLY、导出字段引用 EDITOR_ONLY 目标 → XDB016。
+- `TableOpts.retired`:零值 `false` = live。`true` 只表示 §1.2 的永久 ASSET tombstone,不是禁用、隐藏或临时下线开关;retired message 豁免 live ASSET 的 key/workbook/导出要求,其余非法形态及历史逆转统一由 XDB019 阻止。
 
 单格式声明器语义(CellFormat):
 
@@ -143,7 +160,7 @@ option 枚举语义(零值即默认):
 - 形状域与层数预算:声明自己适用的 ValueShape 与嵌套深度,上限两层,更深必须展开列或子表。
 - 表头批注中的格式说明文本(投影,不进 hash)。
 
-不负责:值语义校验(required/range/regex/引用存在性)、列布局(ExpandMode 职责)、合并粒度(单 cell 恒为整格)、bytes 与运行时表示(convert 只消费 canonical 值,运行时不存在 cell 文本)、历史兼容检查(模块 5 消费声明器身份做 diff)。
+不负责:值语义校验(required/range/regex/引用存在性)、列布局(ExpandMode 职责)、合并粒度(单 cell 恒为整格)、bytes 与运行时表示(convert 只消费 canonical 值,运行时不存在 cell 文本)、历史兼容检查(M8 消费声明器身份做 diff)。
 
 可替换性:schema 编译、校验、布局、convert、codegen 只经 `ICellFormat { TryParse; Write; Describe; 身份 }` 接口消费格式;内置 join/named 是参数化内置实现,codec kind 是宿主注册实现,同一接口。重设计文法 = 整体替换声明器族,不触碰 schema 其余部分;文法讨论范围恒为 CellFormat 一个 message + 一个接口。
 
@@ -158,7 +175,7 @@ kind 细则:
 
 格式变更三阶段(新增 → 迁移 → 安全删除;每阶段一次 schema 发布,canonical + legacy 集合都进 schema_hash):
 
-- 前提:格式迁移只改文本结构,值类型与运行时表示不变;类型/语义变更走模块 5 的字段级同构流程(新 number 新增 → 数据迁移 → reserved 删除)。
+- 前提:格式迁移只改文本结构,值类型与运行时表示不变;类型/语义变更走 M8 的字段级同构流程(新 number 新增 → 数据迁移 → reserved 删除)。
 - 新增:新格式设 canonical,旧格式挂入 `legacy`(`SchemaDefaults` 级同样适用,承载全项目换写法习惯)。窗口内每个 cell 尝试 canonical 与全部 legacy:仅一个成功 → 取之;多个成功且 canonical 值一致 → 取 canonical;值不一致 → `format.ambiguous` error(宁可误报,不许静默换义,防层级对调类陷阱);写出恒为 canonical;legacy 命中计数进 import/check 报告。
 - 迁移:`normalize` 操作(结构生成家族,plan → report → apply)把 legacy 命中 cell 批量重写为 canonical;报告重写数与剩余命中数,跨 workbook 归零即迁移完成。
 - 安全删除:移除 legacy 项;删除依据 = 最近 check/normalize 报告命中为零;删除后旧格式 cell 直接 parse error,不再存在静默解释路径。
@@ -173,7 +190,7 @@ kind 细则:
 | repeated 标量 | ScalarList | 单 cell,分隔串可经 format/文件默认定制 |
 | repeated message | ChildTable | 元素字段落子表;`weighted` 升级为 Weighted;format 声明 2 层 join(`1&2#2&4`)可改单 cell(StructListSingleCell,限小结构) |
 | map<K,V> | Map | K、V 均标量 → 单 cell(format:named 或 2 层 join);V 为 message → 子表 + 唯一键列;枚举键用 `map<int32,V>` + `map_key_enum` |
-| oneof | Union | variant 身份 = field number;payload 布局在模块 2 定 |
+| oneof | Union | variant 身份 = field number;payload 布局由 M5 定 |
 | exceldb.RowRef | InternalRef | 必须声明 ref_table 或 ref_group |
 | exceldb.UnityResourceRef | UnityResourceRef 族 | 解析在 Unity adapter |
 | exceldb.LocalizedTextRef | LocalizedRef 族 | provider 解析 |
@@ -184,7 +201,8 @@ kind 细则:
 TableKind 判定:
 
 - 不挂 `(exceldb.table)` 的 message = 匿名 embedded 形状(默认态):展开列结构体、单 cell 结构体、子表元素、oneof variant payload、preset 字段组、expression 符号表都属于此类;无身份、无 sheet 主权、不可作 RowRef 目标、不可独立加载,codegen 生成普通 class/struct。
-- `kind: ASSET`:一行 = 一个资产;必须有表 id 与 key 字段;拥有 sheet、行身份锚(模块 2)、asset path,可被 RowRef 引用、可按 key 加载、进入 FindAssets/依赖图/ChangeSet;codegen 生成普通 C# 类,资产语义由注册引导与 facade 承载,不派生库基类(M2 D4/Δ11)。
+- `kind: ASSET, retired: false`:一行 = 一个资产;必须有表 id 与 key 字段;拥有 sheet、行身份锚(M5)、asset path,可被 RowRef 引用、可按 key 加载、进入 FindAssets/依赖图/ChangeSet;codegen 生成普通 C# 类,资产语义由 generated registry 与 facade 承载,不派生库基类(M2 D4/Δ11)。
+- `kind: ASSET, retired: true`:只保留 §1.2 table-id tombstone,不再是可挂载/引用/加载的表,不要求 key 或 sheet;descriptor、codegen 与 convert 必须把它和 live ASSET 分流。
 - `kind: EMBEDDED`:显式登记的共享形状,仅当形状需要表级 option(如子表元素的 `validators`、`display_name`)时声明;不得携带 id/key。
 - 挂 option 必须显式选 kind;`UNSPECIFIED` 或 EMBEDDED 带 id/key → XDB015。
 - 子表行的 guid 锚是 merge/热载的机器身份,不是资产身份;子表元素需要被外部引用时,应将元素表提升为 ASSET。
@@ -268,18 +286,32 @@ message SkillConfig {
 管线(工具期,允许分配;Google.Protobuf 依赖只存在于此,Core/运行时零依赖):
 
 ```text
-*.proto → protoc --descriptor_set_out(锁定版本,仅作 parser)
+*.proto → 内嵌的锁定版本 proto parser/compiler → FileDescriptorSet
 → SchemaCompiler:读 FileDescriptorSet + options → lint → normalize(按 id 排序、默认值物化)
 → SchemaDescriptor(canonical 二进制 + 调试 json)→ schema_hash → codegen
 ```
 
+正式 Schema Tooling 是 self-contained CLI 的内嵌能力,而不是外部环境前置条件:
+
+- M4 提供 Project `schemaDir`;M1 递归枚举其下 `*.proto`,统一为 schemaDir-relative `/` 路径并按 ordinal 排序。首表创建前空输入集合法,其余 schema 操作遇空集为用法错误。
+- `schemaDir` 是唯一业务 import root;业务/第三方 proto 必须用相对该目录的 import 路径,禁止随 cwd 或当前文件目录改变解析结果,也禁止 `..` 逃逸。`google/protobuf/*` 与 `exceldb/options.proto` 只从内嵌系统 import 解析。
+- lint、结构化 mutation、descriptor/codegen、workbook 布局、check/import 与 convert 等所有 schema consumer,每次操作都必须从当时 schemaDir 的完整当前 proto 集进入上述同一编译管线。生成 C#、程序集、旧报告或 cache 中的 descriptor 都不是 schema 输入,不得在当前 proto 已变化时继续驱动下游。
+- descriptor、调试 json、输入摘要与 generated registry cache 全是可删除派生物。实现可以在完整校验当前 proto 内容摘要与锁定工具身份后复用 cache 加速,但删除/污染/过期 cache 必须只触发从 schemaDir 重建,不得改变 descriptor、schema_hash、诊断或产物字节。
+- 发布物必须随包携带锁定版本的 proto parser/compiler、`google/protobuf/descriptor.proto`、`exceldb/options.proto` 与初始化模板；实现可以使用库或受控同包组件,但不得按 PATH 查找 `protoc`、`dotnet` 或其他 schema 构建程序。
+- 系统 import 从内嵌资源解析,业务与第三方 import 只从 Project 声明的本地输入解析；缺失即本地诊断并中止,不得尝试联网恢复、下载 SDK/package 或调用包管理器。
+- 同一发布物在 PATH 清空、网络拒绝且机器未安装 protoc/.NET SDK 的环境中,必须可从 `.proto` 完成 descriptor、schema_hash 与全部 §6 codegen。内嵌工具版本记录在 descriptor/报告中但不进入 schema_hash。
+- 一次编译先在暂存区形成 FileDescriptorSet、candidate SchemaDescriptor/hash、全部 C# 与 `RuntimeSchemaRegistry`,再统一 lint/自检。普通 build 只在全部成功后替换派生物;结构化 mutation 还必须把 candidate proto 与这些派生物作为一个提交单元。任一步失败均保留原 proto 与上一组完整派生物,不得让新 descriptor、旧 registry 或局部 C# 可见。
+- previous published descriptor 只作为 retired/M8 历史转换 lint 的显式对照输入;当前 candidate 始终只由当前 schemaDir 编译。previous 缺失时可以重建并消费一个已经发布的当前 schema,但不得批准 live→retired、删除/复活 tombstone等需要历史证明的新发布转换。
+
 descriptor 模型(数字 id 为主键,树形):
 
 ```csharp
-sealed class SchemaDescriptor { TableDescriptor[] Tables; EnumDescriptor[] Enums; ulong SchemaHash; }
+sealed class SchemaDescriptor { TableDescriptor[] Tables; RetiredTableDescriptor[] RetiredTables;
+                                EnumDescriptor[] Enums; ulong SchemaHash; }
 sealed class TableDescriptor  { int Id; string Name; TableKind Kind; string SheetName;
                                 string[] Implements; string[] ValidatorIds;
                                 FieldDescriptor[] Fields; int[] KeyFieldIds; }
+sealed class RetiredTableDescriptor { int Id; string Name; } // 永久 tombstone,无 live layout/runtime surface
 sealed class FieldDescriptor  { int Id; string Name;              // path = 沿树 join Name;id path = 沿树 join Id
                                 ValueShape Shape; string TypeName;
                                 FieldDescriptor[] Children;       // struct 展开/子表元素/oneof variants
@@ -288,16 +320,20 @@ sealed class FieldDescriptor  { int Id; string Name;              // path = 沿�
 sealed class EnumDescriptor   { string Name; EnumValueDescriptor[] Values; }  // value: {Number, Name, Aliases}
 ```
 
+- `Tables` 保留全部非 retired ASSET/EMBEDDED descriptor,沿既有确定序归一化;`RetiredTables` 只含按 id 排序的 ASSET tombstone。table id 唯一性在 `Tables` 的 live ASSET 与 `RetiredTables` 并集上检查。retired proto message 归一化为 `{Id,Name}`;其旧字段/layout 不再进入 live descriptor。RowRef、workbook 布局与 convert 只把 `Tables` 中的 live ASSET 当作数据表。
+- previous/current descriptor diff 以同一 id join live 与 retired 集合:previous live → current retired 是唯一合法退役边;previous retired 必须在 current 保持同 id retired。previous retired 消失、转 live、改 id或其 id 被另一 live/retired 声明占用均命中 XDB019;同 id 的 name 变化按普通 rename 分类。
+
 schema_hash(xxHash64,对 canonical descriptor 字节流):
 
-- 进:table/field/enum/variant 的 id 与 name、kind、shape、类型引用、key 结构、required/default/min/max/regex/unique、ref_table/ref_group/delete_policy、weighted/expression 描述、enum 值 number+name、表级与字段级 export policy(物化继承后的值)、expand 物化结果、cell format 物化身份(join 分隔串栈 / named pair+kv / codec id+version,含 legacy 集合)。
+- 进:live table/field/enum/variant 的 id 与 name、kind、shape、类型引用、key 结构、required/default/min/max/regex/unique、ref_table/ref_group/delete_policy、weighted/expression 描述、enum 值 number+name、表级与字段级 export policy(物化继承后的值)、expand 物化结果、cell format 物化身份(join 分隔串栈 / named pair+kv / codec id+version,含 legacy 集合),以及每个 retired tombstone 的 id+原 message name+retired 状态。
 - 不进:display_name、header_comment、aliases、文件顺序、空白注释、protoc 与工具版本(记录在 descriptor 里,不入 hash)。
-- name 进 hash 的原因:字段名绑定 property path 与列路径,是消费语义;兼容分析(模块 5)按数字 id 判断 rename。
+- name 进 hash 的原因:字段名绑定 property path 与列路径,是消费语义;兼容分析(M8)按数字 id 判断 rename。
 
 lint 规则(XDB0xx,blocker 即不产出 descriptor/codegen;作用域 = 项目 package 内的声明,不含 google/exceldb 系统 import——PoC 实证:否则 descriptor.proto 自身的枚举会误触 XDB013):
 
 ```text
-XDB001 表 id 缺失/重复/复用 reserved      XDB002 ASSET 表无 key 字段
+XDB001 ASSET 表 id 缺失,或 live ASSET+retired 唯一域内重复/复用 tombstone
+XDB002 live ASSET 表无 key 字段
 XDB003 field number 复用 reserved         XDB004 key 落在非标量字段
 XDB005 单 cell 嵌套深度超过 join 声明层数(上限两层)  XDB006 expand 用于非 message 字段
 XDB007 ref_table/ref_group 目标不存在     XDB008 weighted 的 field number 指认失败
@@ -309,55 +345,66 @@ XDB015 table option 的 kind 未显式指定,或 EMBEDDED 声明 id/key
 XDB016 key 字段声明 EDITOR_ONLY,或导出字段的引用目标为 EDITOR_ONLY 表/字段
 XDB017 format 分隔串非法(空串/互为子串/含引号或转义字符,含 pair/kv 分隔),或层数与嵌套深度不匹配
 XDB018 format legacy 项嵌套 legacy,或 legacy 与 canonical 物化身份相同
+XDB019 retired 用于非 ASSET/无稳定 id/非 previous-live 新表,或 previous tombstone 被删除、清标记复活、改 id、id 被复用
 ```
 
 ## 6. codegen 产物
 
-生成器消费 SchemaDescriptor(不使用 protoc 的 C# 插件),每个 ASSET/EMBEDDED message 生成:
+生成器消费 SchemaDescriptor(不使用 protoc 的 C# 插件),只为 `Tables` 中的 live ASSET 与仍被 live schema 使用的 EMBEDDED message 生成:
 
-1. 强类型类:ASSET 与 EMBEDDED 均为普通 C# 类/结构,无库基类与 `name`/`GetInstanceID` 成员(库定位 Unity 无关,Unity 手感止于 facade 用法,M2 D4/Δ11);资产身份经注册引导(产物 7)由库侧维护;C# 成员 PascalCase,绑定表记录 field id ↔ C# 成员 ↔ property path(= proto 字段名)。
+1. 强类型类:live ASSET 与被 live schema 使用的 EMBEDDED 均为普通 C# 类/结构,无库基类与 `name`/`GetInstanceID` 成员(库定位 Unity 无关,Unity 手感止于 facade 用法,M2 D4/Δ11);资产身份经 generated registry(产物 7)由库侧维护;C# 成员 PascalCase,绑定表记录 field id ↔ C# 成员 ↔ property path(= proto 字段名)。
 2. cell 解析器与写出器:canonical 字面量 ↔ 字段值,span 上直解,不用反射;结构文法经声明器——内置 join/named 按物化参数内联生成,codec kind 走 `ICellFormat` 注册接口。
-3. bytes 访问器:按列目录偏移直读(格式在模块 4)。
+3. bytes 访问器:按列目录偏移直读(格式由 M7 定)。
 4. patcher:实例字段级 diff 与就地覆写(hot reload 用)。
 5. 属性树元数据:SerializedProperty 路径表与数组/子表访问桩。
 6. 符号结构体:每个 symbols_type 生成 `struct`,`Expression<T>.Eval(in TSymbols)` 免装箱。
-7. 注册引导:表 id → 类型/工厂/访问器,enum 别名表,validator/codec id 绑定点。
-8. 内嵌 `SchemaHash` 常量:运行期与 workbook/bytes 校验,不一致走模块 5 兼容规则。
+7. 不可变 `RuntimeSchemaRegistry`:由生成代码提供具体实现/单例,`ExpectedSchemaHash` 编译为当前完整 `SchemaDescriptor.SchemaHash`;按 live table id 确定序固化 table id → CLR type/factory/accessor/patcher 绑定,并携带 enum 别名表及 validator/codec 绑定点。registry 没有运行时追加/替换入口,作为 M7 `RuntimeDatabase.Open` 的不可省略代码期望输入。
+8. 内嵌 hash 常量:生成类型需要的 hash 常量与 registry `ExpectedSchemaHash` 必须来自同一 candidate descriptor并逐值相等;运行期由 M7 把 registry expected hash 与 Excel/bytes source hash 硬比较。是否拆分 authoring/runtime hash 由总纲 OD6 裁决,裁决前均使用当前单一 hash。
+
+retired table 不产生强类型类、cell parser/writer、bytes accessor、patcher、属性树元数据或 registry binding,也不进入 bytes table 集;其唯一生成影响是完整 schema_hash 中保留 tombstone。一次 codegen 必须按 candidate 的完整输出清单删除刚退役表留下的旧生成文件,并与新 descriptor/registry 原子提交,禁止旧类型或旧 registry binding 残留为“幽灵 live 表”。
 
 ## 7. 模块验收测试
 
-1. determinism:proto 文件顺序、空白、注释、option 书写顺序变化 → descriptor 字节与 schema_hash 不变。
+1. determinism:schemaDir 递归枚举顺序、cwd、proto 文件顺序/空白/注释/option 书写顺序变化 → 归一输入集、descriptor 字节与 schema_hash 不变;schemaDir-relative import 成功,逃逸/缺失 import 失败。
 2. 身份:字段/表/枚举值 rename(number 不变)→ id path 不变,兼容分析判为 rename;number 变化 → 判为删+增。
-3. reserved:复用 reserved number → XDB003/XDB001 blocker。
+3. reserved/tombstone:字段/enum number 复用 reserved → XDB003;live/retired 当前唯一域重复 table id → XDB001;复用 previous retired id → XDB019。
 4. preset:CommonHeader 展开后 descriptor 只见普通字段,子字段 id path 以 common 字段 id 为前缀。
 5. 全 shape 覆盖:§3 表每行至少一个描述符快照测试(golden descriptor json 比对)。
 6. expression:符号解析、类型检查、非法符号/结果类型 → XDB009 或编译 error。
 7. weighted:weight_field/condition_field 指认与非法指认。
-8. map:string 键、int32+map_key_enum 键、message 值(子表形)三例;重复键留给模块 3 导入测试。
+8. map:string 键、int32+map_key_enum 键、message 值(子表形)三例;重复键留给 M6 导入测试。
 9. oneof:variant 集合进 hash;variant 增删改变 hash;XDB014。
-10. 示例 proto(§4)编译 → descriptor golden + codegen 编译通过 + `skill.Damage`/`FindProperty("cost.mp")` 绑定表断言。
-11. TableKind 三态:匿名形状 / EMBEDDED / ASSET 各一例;kind 未指定与 EMBEDDED 带 id/key → XDB015。
+10. 示例 proto(§4)编译 → descriptor golden + codegen 编译通过 + `skill.Damage`/`FindProperty("cost.mp")` 绑定表断言;generated registry 的 live table/type/accessor 绑定与 descriptor 一致。
+11. TableKind/状态:匿名形状 / EMBEDDED / live ASSET / retired ASSET 各一例;kind 未指定与 EMBEDDED 带 id/key → XDB015;retired 非 ASSET → XDB019。
 12. option 枚举:AUTO expand 物化确定性(纯标量 → 单 cell,含嵌套 → 展开列);export 继承链物化;key 字段 EDITOR_ONLY 与导出引用指向 EDITOR_ONLY 目标 → XDB016;delete_policy 三值在删除计划中的行为(BLOCK 优先)。
 13. 单格式声明器:`30#0`(struct 1 层)、`sword&2#potion&5`(repeated struct 2 层)、`8:00-12:00@2.5`(嵌套 struct 2 层)、`101->102`(多字符分隔)、`mp:30#hp:0`(named 自定义 pair/kv)、map 位置序各一例往返;缺尾段/空段缺失态与超段 error;权重省略简写;分隔串转义;互为子串 → XDB017;文件默认与字段覆盖的物化确定性;自定义 `ICellFormat` 注册为 codec kind 的往返与替换一例。
 14. 格式三阶段:窗口解析三态(唯一成功/多成功值一致/`format.ambiguous`,含层级对调陷阱 `1&2#3&4`);写出恒 canonical;normalize 重写与命中归零报告;删除 legacy 后旧 cell fail loud;SchemaDefaults 级窗口(全项目换习惯)一例;legacy 嵌套与同身份 → XDB018。
+15. 入口等价:分别由文本编辑和结构化 mutation 产出语义与字节均相同的 `.proto` → descriptor、schema_hash、C# 与 `RuntimeSchemaRegistry` 逐字节一致；删除向导状态/cache 后重建结果不变。
+16. mutation/编译原子性:建表、加字段、保 number rename、reserved 删除、live 表退役各一例成功提交；构造重复 number、XDB019、lint blocker、codegen/registry 失败,断言原 `.proto`、descriptor、C# 与 registry 全部逐字节不变且无部分新文件可见。退役成功时旧表生成文件与 registry binding 在同一提交中消失。
+17. 离线自包含:仅把 self-contained CLI 发布物复制到空目录,清空 PATH、拒绝网络并确保无 protoc/.NET SDK；经结构化入口创建首个 proto、再修改字段,两次均能从内嵌 system import 产出 descriptor、C# 与 registry,且无进程查找或下载行为。项目本地 import 成功,缺失 import 只报本地错误。
+18. 表退役生命周期:previous published live ASSET → 保留同 message/id并设 retired,唯一合法转换成功;descriptor 从 Tables 的 live ASSET 集移入 RetiredTables且 hash 改变。断言 retired 无 workbook 要求、C# 类型、runtime registry binding 与 bytes table;table-id 建议同时避开 live/retired。新建即 retired、无 previous live、删除 tombstone、清标记、改 id及任意 id 复用分别命中 XDB019;当前集合重复另命中 XDB001。同 id retired rename 判兼容 rename且状态仍 retired。
+19. retired 确定性与历史 diff:含多个 live/retired 的 schema 在文件/枚举顺序变化、cache 删除/污染后重建出相同 Tables/RetiredTables、descriptor 字节与 hash;previous/current diff 能区分 live→retired、retired 保持、tombstone 消失/复活/复用。previous 变化不得改变由相同当前 proto 编译出的 candidate 字节,只改变转换 lint 结果。
+20. generated registry:反射断言 registry 不可变、无运行时 Register/Replace API,`ExpectedSchemaHash == SchemaDescriptor.SchemaHash`,binding 按 live table id 确定序且不含 retired。分别污染/删除 descriptor cache、旧 C# 与旧 registry后运行 descriptor/codegen、layout、check/import、convert consumer,断言都重新观察 schemaDir 当前 proto并得到同一 hash/绑定;过期 cache 不得让任何 consumer 接受旧 schema。
 
 ## 8. 与仓库现状衔接
 
 - 旧实现(`ConfigDatabase`/`ExcelTableLoader`/SkillEditor 样例/旧测试/excels 样例数据)已于 2026-07-09 整体移除(D11);历史实现经 git 历史查阅,`UndoStack`/`DependencyGraph`/xlsx IO 需要时按件回捞参考。
 - `options.proto` v2 相对 v1(git 历史)的兼容姿态保持:`TableOptions` 沿用 50001 号位,50011-50015 reserved;`ExternalRef` 由 reference family 取代。
-- 现行可运行衔接 = `poc/SchemaPoc`(schema 编译 + C#/Excel 双生成 + 自检,见 `poc/README.md`);正式工程按实施文档 §1 布局另起,protoc 经 `Grpc.Tools` 仅在工具工程引用,运行时零 Google.Protobuf 依赖。
+- 现行实现衔接仅为 `poc/SchemaPoc` 所列子集(schema 编译 + C#/Excel 双生成 + 自检,见 `poc/README.md`),尚未满足 §1.1/1.2 的结构化 mutation/表退役、generated `RuntimeSchemaRegistry` 与 §5 的 self-contained 离线封装验收；正式工程必须遵守总纲 §5 的组件边界,proto parser/descriptor 依赖仅存在于 Schema Tooling,不得进入 Core Runtime。
 
-## 9. 待后续模块决定的边界
+## 9. 跨模块边界与开放决策
 
-- RowRef 的 cell token、`RowRef.id` 与行身份(guid/表内 id)的关系 → 模块 2(workbook 与身份)。
-- 各 shape 的 cell 文法、表头三行布局、下拉与批注 → 模块 2。
-- 导入校验时机与诊断码、key 索引 → 模块 3(导入与编辑)。
-- bytes 布局与运行时访问器细节 → 模块 4(运行时)。
-- schema 变更兼容矩阵与迁移 → 模块 5:字段级三阶段(新 number 新增 → 数据迁移 → reserved 删除)、位置序 format 的非尾部插字段段位漂移检查(需对比上次发布的 descriptor 快照,声明器自身无历史知识)。
+- RowRef 的 cell token、`RowRef.id` 与行身份的关系 → M5/M6,并受总纲 OD1 约束。
+- 各 shape 的 cell 文法、表头三行布局、下拉与批注 → M5。
+- 导入校验时机与诊断码、key 索引 → M6。
+- bytes 布局与运行时访问器细节 → M7。
+- 表 ID 退役与永久 tombstone 已由本文 §1.2/§2/§5 裁决,不再是开放边界:M8 只消费 live/retired previous diff 做兼容报告与发布门禁,M7 只消费排除 retired binding 的 generated registry；任何模块不得另建第二份 retired-id 注册表。
+- schema 变更兼容矩阵与迁移 → M8:字段级三阶段(新 number 新增 → 数据迁移 → reserved 删除)、位置序 format 的非尾部插字段段位漂移检查(需对比上次发布的 descriptor 快照,声明器自身无历史知识)。
+- 空目录 Project 初始化、交互提示/页面、CLI 命令形态与阶段编排 → M4；本文只拥有结构化 mutation 的事实源、事务与离线 Schema Tooling 契约。
 
 ## 10. 决策记录
 
-约定:本节按时间追加,不回改;修订以新条目引用旧条目;后续模块沿用。每条决策是一个三级标题条目,条目间以分隔线隔开;条目内是一次对话拍:引用块 = 评审原话(仅实质设计发起才录;过堂暴露或推演自发的条目以一行普通问题陈述代替);随后**一句加粗的重点回应** = 当时让方案成立的关键洞察;最后"落点"一行 = 决策落在规格何处与次要说明(否决备选、边界划分)。本节是记忆锚,不是第二份规格——机制细节只在正文,此处不复述。全局裁剪台账见 `exceldb-cuts-adr.md`。
+约定:本节按时间追加,不回改;修订以新条目引用旧条目。每条决策是记忆锚,不是第二份规格——机制细节只在正文,此处不复述。旧全局裁剪台账已归档于 [`docs/archive/2026-07-authority-merge/`](../archive/2026-07-authority-merge/README.md),仅供历史追溯。
 
 ---
 
@@ -480,3 +527,28 @@ XDB018 format legacy 项嵌套 legacy,或 legacy 与 canonical 物化身份相�
 **旧代码的价值只剩"可回捞的参考",留在工作区就是干扰源,git 历史是更好的存放处——新契约与旧模型(proto v1 行表 / ConfigDatabase)之间不存在渐进迁移路径,按件回捞优于带着旧骨架施工。**
 
 落点:`src/`、`samples/`、`tests/`、`excels/` 全部移除(git 历史保留);`ExcelDB.slnx` 改指 poc 工程;§8 改写为仓库现状衔接;PoC 冒烟验证删除后全绿。
+
+---
+
+### D12(2026-07-11)向导维护 proto,Schema Tooling 随 CLI 离线内嵌
+
+> 再次考虑工作流.
+> 预期 会有一个可执行文件, 当我爸这个可执行文件粘贴到一个空文件夹时, 该文件夹会引导我将这个空文件夹初始化为一个项目.
+> 该可执行文件还将引导我:
+> 从0创建一个excel.
+> 修改表结构, 并生产cs数据文件,
+> 生产cs文件的对应数据,
+
+**可执行文件是 schema 的易用门面,不是新的结构事实源——向导把用户意图事务性提交为 proto,由同一 descriptor/codegen 管线生成 C# 投影；要让“复制到空目录即可开始”成立,parser、options 与模板必须随 self-contained CLI 离线内嵌,不能把 PATH、SDK 或网络偷偷变成前置条件。**
+
+落点:§1 取消“必须手写”并增加结构化 mutation 契约,§5 固定离线自包含边界,§7 增加入口等价/原子性/隔离环境验收；交互形态与 Project 编排仍归 M4。
+
+---
+
+### D13(2026-07-11)表退役留在 proto,运行时期望留在 generated registry
+
+推演自发:表 id 若随 message 删除而消失,新表建议与 fresh clone 都无法证明未复用；运行时若从 source 自己取得 expected hash,错误代码与错误数据也会“自洽”通过。
+
+**同一份版本化 proto 同时保存 live 声明与单向 retired tombstone,因此 cache 全删后仍能重建永久 table-id 占用集合；同一 candidate descriptor 再生成不可变 `RuntimeSchemaRegistry`,把代码期望的完整 hash 与 live 类型绑定交给 M7 Open,而 retired 永远不回到运行时表面。**
+
+落点:§1.2、`TableOpts.retired = 8`、XDB019、SchemaDescriptor live/retired 集、§6 registry、§7 第 18-20 条；表 ID tombstone 不再列为开放决策。

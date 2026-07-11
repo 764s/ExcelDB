@@ -25,5 +25,5 @@ dotnet build poc/SchemaPoc.GeneratedCheck -c Release           # 证明生成的
 weighted/expression/curve/map/union/ref 声明、XDB001/002/004/005/007/009/013/015 lint、
 schema_hash 跨次运行确定性、xlsx 结构自检(6 项)。
 
-未覆盖(归属后续模块):cell 解析回读与校验(模块 3)、表头批注与 RowRef token 语义(模块 2)、
-bytes 与运行时访问器(模块 4)。union 的 C# 成员暂为 object,类型化 getter 留给正式 codegen。
+未覆盖(归属后续模块):cell 解析回读与校验(M6)、表头批注与 RowRef token 语义(M5)、
+bytes 与运行时访问器(M7)。union 的 C# 成员暂为 object,类型化 getter 留给正式 codegen。当前权威规范入口见 [`docs/spec/README.md`](../docs/spec/README.md)。

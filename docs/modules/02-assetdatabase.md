@@ -1,10 +1,10 @@
 # 模块 2:AssetDatabase 门面(使用样例)
 
-状态:本文是逐模块重推演的第 2 篇,以使用样例锁定 `ExcelDbEditor.AssetDatabase` 的对外契约,取代 `exceldb-lean-plan.md` §6.7 的签名清单。对齐基准 = Unity 2022.3 `UnityEditor.AssetDatabase`,像素级:成员名、参数名、返回类型、重载集与调用形态逐字对照;语义与 Unity 相同的成员不复述文档(P§0 写法规则),偏差全部登记在 §8。模块编号自本篇顺延,并经第 3 篇(工作流,`03-workflow.md`)与第 4 篇(集成工具,`04-integration-tools.md`,2026-07-11)再顺延:M1 文中预派的"模块 2(workbook 与身份)/模块 3(导入与编辑)/模块 4(运行时)/模块 5(兼容)"与本文正文所写"模块 3/4/5/6"统一改读"模块 5/6/7/8"。后续模块引用本文记作 M2§x;精简计划记作 P§x,模块 1 记作 M1§x。
+状态：Accepted Design，尚未 Dependency-Complete。本文是 M2 AssetDatabase facade 的唯一 owner；其 workbook、导入编辑与运行时语义分别依赖 M5/M6/M7 收口。跨模块权威规则和开放决策见 [`docs/spec/README.md`](../spec/README.md)。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
 
 ## 1. 范围、映射与失败形态
 
-- 范围:编辑期 authoring 门面——挂载、刷新与导入、加载、查找、结构操作、保存、依赖、标签、冲突。运行时读取是 RuntimeDatabase(模块 5),不在本文。
+- 范围:编辑期 authoring 门面——挂载、刷新与导入、加载、查找、结构操作、保存、依赖、标签、冲突。运行时读取由 M7 RuntimeDatabase 拥有,不在本文。
 - 命名空间对应:`ExcelDbEditor` ↔ `UnityEditor`(`AssetDatabase`/`GUID`)。数据类型无 Unity 对应物:生成类是普通 C# 类,不派生 `Object`/`ScriptableObject`(Δ11);本文签名中的资产参数一律为 `object` 或泛型 `T`,合法实参 = SchemaRegistry 已注册的生成类实例,违者按失败形态返回 + Diagnostic。
 - 样例即规格:样例展示的调用形态、返回值与注释断言就是契约;`Assert(条件)` 表示验收断言(§9 的测试基线),不是 API 成员。全文样例基于 M1§4 的 `game.proto` 生成类型(`Game.Configs`,C# 成员 PascalCase,M1§6),workbook 为 `Assets/Configs/game.xlsx`(SkillConfig 表 id 101、ItemConfig 102,key = `common.id`)与同 schema 的第二本 `Assets/Configs/game_dlc1.xlsx`;各代码块共享 §2 开头的 using 与路径常量。
 - 概念映射(资产模型的像素对位):
@@ -17,7 +17,7 @@
 | GUID(.meta 记录) | row guid(`__guid` 伴随列) | AssetGuid ≡ row guid(P§5.3) |
 | .meta 文件 | 伴随列 + metadata sheet | P§5.1/5.2 |
 | Library 导入缓存 | 导入快照 | P§6.2 |
-| AssetImporter / AssetPostprocessor | 固定导入管线 + `workbookImported` 事件 | Δ1,管线细节归模块 4 |
+| AssetImporter / AssetPostprocessor | 固定导入管线 + `workbookImported` 事件 | Δ1,管线细节归 M6 |
 | 子资产(sub-asset) | 无 | 相关成员整族不提供(§8) |
 | 标签(任意资产可挂) | schema 声明的 labels 字段 | M1§2,Δ8 |
 
@@ -70,12 +70,12 @@ Assert(AssetDatabase.GetMainAssetTypeAtPath(Fireball) == typeof(SkillConfig));
 - `Refresh()` 语义同 Unity:扫描外部变化并导入(走 P§6.1 导入、必要时 P§6.3 合并)。watcher(P§6.8)自动触发同一路径,手调是兜底。
 - `ImportAsset(path)` 只接受 workbook 路径:单本强制走导入管线;`ImportAssetOptions.ForceUpdate` 忽略内容指纹(Δ9)。
 - `workbookImported` 在每次导入完成后派发(挂载、Refresh、ImportAsset、watcher 触发各算一次);Unity 对应物是 `AssetPostprocessor.OnPostprocessAllAssets`,ExcelDB 以事件而非基类交付(Δ1)。
-- 卸载时存在未保存 dirty → 失败 + Diagnostic(不丢数据):先 `SaveAssets`,或走模块 4 的撤销/回滚后再卸载。
+- 卸载时存在未保存 dirty → 失败 + Diagnostic(不丢数据):先 `SaveAssets`,或走 M6 的撤销/回滚后再卸载。
 
 ```csharp
 AssetDatabase.workbookImported += report =>
 {
-    // ImportReport = OperationReport(P§9)的 import 投影,字段细节归模块 4
+    // ImportReport = OperationReport 的 import 投影,字段细节归 M6
     if (!report.Ok)
         foreach (var d in report.Diagnostics)
             Console.WriteLine($"{d.Code} {d.Severity}");
@@ -127,12 +127,12 @@ object[] whole = AssetDatabase.LoadAllAssetsAtPath(Game);                  // �
 
 - 落盘时机是本组最大偏差(Δ3):全部结构操作即时生效于内存与索引,统一在 `SaveAssets` 经合并-补丁管线落盘(P§6.5);Unity 是即时写盘。样例注释中的"落盘"皆指此。AssetDatabase 结构操作不进 Undo 栈(同 Unity)。
 - `CreateAsset`:类型面 = ASSET 表的生成类(M1§3);实例用 `new` 创建(普通 C# 类,Δ11;Unity 为 `CreateInstance`),类型合法性 = SchemaRegistry 已注册,运行期校验,未注册类型 → error。path 表段必须已挂载且 sheet 已生成(缺 sheet → error,提示先跑结构生成 P§6.6)。path 末段覆写 key 字段(同 Unity 主资产名随文件名);guid 即时分配(内存态),落盘走身份规则 1(P§5.3)。已存在同 key → error + no-op(Δ4:Unity 直接覆写);key 唯一域 = 目标表、跨 workbook(P§8.1)。已持久化实例再 CreateAsset → error(同 Unity)。
-- `DeleteAsset` 返回是否删除,行为按持有方 RowRef 的 `delete_policy`(M1§2):引用闭包内有 BLOCK → `false` + 引用者清单诊断;SET_NULL/CASCADE → 按删除计划执行 → `true`;删除后 resident 实例进入 missing 态(P§7.1 语义;POCO 类型面下的承载方式归模块 5)。`DeleteAssets` 全部成功才 `true`,失败路径落 `outFailedPaths`(同 Unity)。
+- `DeleteAsset` 返回是否删除,行为按持有方 RowRef 的 `delete_policy`(M1§2):引用闭包内有 BLOCK → `false` + 引用者清单诊断;SET_NULL/CASCADE → 按删除计划执行 → `true`;删除后 resident 实例进入 missing 态(M7;POCO 类型面下的承载由 M7 定)。`DeleteAssets` 全部成功才 `true`,失败路径落 `outFailedPaths`(同 Unity)。
 - `RenameAsset` 改 key:返回空串 = 成功,否则错误串(同 Unity);guid 不变,全部引用 cell 自动改写并进保存计划(P§8.1),路径随 key 变化。
 - `MoveAsset` 跨 workbook 迁移行(guid 与引用不变);末段变化兼作改名(同 Unity);表段变化/目标未挂载/目标缺 sheet → 错误串。
 - `CopyAsset` = 复制即新资产:新行新 guid(同 Unity 复制语义),行内 RowRef 照抄、仍指原目标;目标已存在 → `false`。
 - `StartAssetEditing`/`StopAssetEditing`:计数式可嵌套、必须 try/finally 配对(同 Unity);计数 > 0 时 watcher 合并、索引重建与写回全部挂起,归零时一次性聚合;长期不配对 = 挂起 + `assetdb.editing_unbalanced` warning。
-- 生成类无 `name` 成员(Δ11):已持久化行的 key 变更走 `RenameAsset`;key 字段被直接改写(绕过 RenameAsset)的判定与归一属导入/编辑门面,归模块 4(§11)。
+- 生成类无 `name` 成员(Δ11):已持久化行的 key 变更走 `RenameAsset`;key 字段被直接改写(绕过 RenameAsset)的判定与归一属 M6 导入/编辑契约。
 
 ```csharp
 // 创建:new → 填字段 → CreateAsset(Unity 惯用序的 C# 化:普通类直接 new,Δ11)
@@ -191,7 +191,7 @@ AssetDatabase.SaveAssets();   // Δ3:以上全部至此才落盘(合并 → 补�
 ## 6. 保存、依赖、标签与打开
 
 - `SaveAssets` = P§6.5 事务全序(preflight 合并 → 写回计划 → 补丁写回 → 复读校验 → 原子替换 → 快照与 `__rev`);`SaveAssetIfDirty` 把写回计划收窄到单行(该行所在 workbook,仅该行 cell + metadata)。
-- 字段编辑与 dirty 语义(`SerializedObject`/`Undo`/`EditorUtility.SetDirty`)是模块 4 的门面,样例仅示意闭环。
+- 字段编辑与 dirty 语义(`SerializedObject`/`Undo`/`EditorUtility.SetDirty`)由 M6 拥有,样例仅示意闭环。
 - `GetDependencies`:依赖 = 该行经 RowRef 引用的行(子表、单 cell、weighted 内的 RowRef 都归属父行);`recursive` 缺省 true 且结果含输入自身(同 Unity),false = 仅直接依赖、不含自身。UnityResourceRef/LocalizedTextRef 目标不是 ExcelDB 资产,不进结果(Δ7)。逆向查询 = `FindAssets("ref:…")`。
 - 标签:`GetLabels`/`SetLabels`/`ClearLabels` 读写 labels 字段(M1§2 `labels: true`,样例 schema 即 `common.tags`);Set/Clear 走正常 dirty/保存(P§4.7)。无 labels 字段的表:Get → 空数组,Set/Clear → error(Δ8:Unity 标签存 .meta,任意资产可用)。
 - `OpenAsset` 用系统关联程序打开所在 workbook(Excel),尽力定位 sheet 与行(adapter 实现,Δ10)。
@@ -200,7 +200,7 @@ AssetDatabase.SaveAssets();   // Δ3:以上全部至此才落盘(合并 → 补�
 var fireball = AssetDatabase.LoadAssetAtPath<SkillConfig>(Fireball);
 
 fireball.Damage = 150;
-EditorUtility.SetDirty(fireball);                            // 模块 4 门面;ApplyModifiedProperties 自动含此
+EditorUtility.SetDirty(fireball);                            // M6 门面;ApplyModifiedProperties 自动含此
 AssetDatabase.SaveAssetIfDirty(fireball);                    // 只写 fireball 一行
 AssetDatabase.SaveAssetIfDirty(AssetDatabase.GUIDFromAssetPath(Fireball));   // GUID 重载(同 Unity)
 
@@ -316,7 +316,7 @@ public static class AssetDatabase
 ```csharp
 public enum ImportAssetOptions { Default = 0, ForceUpdate = 1 }   // Δ9:其余 Unity 枚举值不提供
 public readonly struct GUID { /* 128 位;TryParse / ToString(32 hex 小写)/ Empty() 同 Unity 形态 */ }
-// ImportReport = OperationReport(P§9)的 import 投影(字段细节归模块 4);
+// ImportReport = OperationReport 的 import 投影(字段细节归 M6);
 // ConflictRecord / ConflictId / ConflictResolutionAction / RuntimeQueryStatus 沿用 P§6.3/§6.7,不重定义。
 ```
 
@@ -334,7 +334,7 @@ public readonly struct GUID { /* 128 位;TryParse / ToString(32 hex 小写)/ Emp
 | Δ8 | 标签依赖 schema 的 labels 字段;无字段表 Get → 空、Set/Clear → error | 标签是数据列不是 .meta 附件(M1§2):进 schema、进版本控制、可被 Excel 直编 |
 | Δ9 | `ImportAssetOptions` 仅 `Default`/`ForceUpdate` | 其余 Unity 值绑定其原生 importer 体系,无对应物 |
 | Δ10 | `OpenAsset` 仅 `object` 重载,行定位尽力(adapter);行号/列号重载不提供 | xlsx 无行号语义;定位能力因宿主与 Excel 版本而异 |
-| Δ11 | 生成类是普通 C# 类:不派生 `Object`/`ScriptableObject`,无 `name`/`GetInstanceID` 成员;创建用 `new`(Unity 为 `CreateInstance`);facade 资产参数 = `object`/泛型 `where T : class`,类型合法性 = SchemaRegistry 注册,运行期校验 + Diagnostic(编译期基类约束不可得) | 库定位 Unity 无关(核 11):Unity 手感限于 facade 用法,不复刻数据基类——生成类不占用户继承位、可在任意宿主(服务端/CLI/Unity)直接消费;key 字段本体即名,resident/missing 语义由库侧注册表承载(模块 5) |
+| Δ11 | 生成类是普通 C# 类:不派生 `Object`/`ScriptableObject`,无 `name`/`GetInstanceID` 成员;创建用 `new`(Unity 为 `CreateInstance`);facade 资产参数 = `object`/泛型 `where T : class`,类型合法性 = SchemaRegistry 注册,运行期校验 + Diagnostic(编译期基类约束不可得) | 核心宿主无关:Unity 手感限于 facade 用法,不复刻数据基类——生成类不占用户继承位、可在任意宿主(服务端/CLI/Unity)直接消费;key 字段本体即名,resident/missing 语义由 M7 运行时侧表承载 |
 
 不提供清单(Unity 成员 → 一句理由;不在签名块与本表的成员一律视同此表):
 
@@ -366,7 +366,7 @@ public readonly struct GUID { /* 128 位;TryParse / ToString(32 hex 小写)/ Emp
 7. RenameAsset:空串/错误串双形态;guid 不变;引用 cell 全改写并进保存计划(P§8.1);旧路径 → null、新路径可达。
 8. MoveAsset:跨 workbook 后 guid 与引用不变;末段改名等价 RenameAsset;表段变化/未挂载/缺 sheet → 错误串。
 9. CopyAsset:新 guid;RowRef 照抄指原目标;目标已存在 → false。
-10. DeleteAsset(s) × delete_policy:BLOCK → false + 引用者清单;SET_NULL 清格 + dirty;CASCADE 影响集且闭包内 BLOCK 优先(M1§2);`outFailedPaths` 精确;删除后 resident 进入 missing 态(P§7.1 语义,承载归模块 5)。
+10. DeleteAsset(s) × delete_policy:BLOCK → false + 引用者清单;SET_NULL 清格 + dirty;CASCADE 影响集且闭包内 BLOCK 优先(M1§2);`outFailedPaths` 精确;删除后 resident 进入 M7 missing 态。
 11. 批量编辑:计数嵌套;挂起 watcher/写回;归零聚合一次;不配对 → 挂起 + warning。
 12. 保存:Δ3 时机(SaveAssets 前 xlsx 字节不变);`SaveAssetIfDirty` 单行写回计划与 GUID 重载;SaveAssets 全序与失败报告(P§6.5)。
 13. 依赖:recursive 含自身、直接不含;子表/单 cell 内 RowRef 归属父行;UnityResourceRef/LocalizedTextRef 不进(Δ7);与 `ref:` 查询互逆。
@@ -376,18 +376,17 @@ public readonly struct GUID { /* 128 位;TryParse / ToString(32 hex 小写)/ Emp
 
 ## 10. 与仓库现状衔接
 
-- 本文取代 P§6.7:`RenameAsset` 返回值 bool → string(像素修正);新增 `Contains`/`GetAssetPath`/`IsValidFolder`/`LoadAllAssetsAtPath`/`GetMainAssetTypeAtPath`/`ImportAsset`/`MoveAsset`/`CopyAsset`/`DeleteAssets`/`GenerateUniqueAssetPath`/`StartAssetEditing`/`StopAssetEditing`/`SaveAssetIfDirty`/`GetDependencies`/`ClearLabels`/`OpenAsset`/`GUIDFromAssetPath`;`FindAssets` 文法与 `GUID` 家族细化;`GUID`/`UnityGuid` 双命名空间结论沿用。`exceldb-lean-plan.md` 与 `exceldb-implementation.md` 头部注记已同步指向本文。
-- 生成类型面改为普通 C# 类(D4/Δ11):M1§3/§6 已同步修订;P§7.1 的 `Object`/`ScriptableObject` 基类模型作废,`AssetKey`/`AssetIdentity` 与 resident/missing 语义保留、承载方式归模块 5;poc `CSharpEmitter` 已改为无基类发射。
+- 本文是 AssetDatabase facade 的唯一 owner;归档计划中的旧签名清单与 Unity 对象基类模型均无规范效力。
+- 生成类型面为普通 C# 类(D4/Δ11):M1§3/§6 已同步;`AssetKey`/`AssetIdentity` 与 resident/missing 语义由 M7 收口。
 - 样例类型基底 = M1§4 proto 经 codegen 的 `Game.Configs`(poc 已生成同名类型 `SkillConfig.Damage`/`Common.Id`,见 `poc/SchemaPoc.GeneratedCheck/Generated/GameConfigs.g.cs`)。
-- 本模块仅文档,无代码交付(评审要求);实施对应实施文档 §3-M3,其 3.1"AssetDatabase facade 全签名(P§6.7)"读作指向本文。
+- 本模块当前仅有 Accepted Design,无完整代码交付;实现路线必须从本文生成,不得引用归档实施文档定义契约。
 
-## 11. 待后续模块决定的边界
+## 11. 跨模块边界与开放决策
 
-- workbook 物理契约:三行表头、下拉、批注、metadata sheet 细节、RowRef cell token、`RowRef.id` 与行身份(guid/表内 id)的关系 → 模块 3(M1§9 预派给"模块 2"的议题,编号顺延)。
-- 导入管线细节(校验时机、诊断码全集、`ImportReport` 字段、快照格式)与 `SerializedObject`/`Undo`/`EditorUtility` 门面 → 模块 4;key 字段经字段/属性直改(绕过 `RenameAsset`)的判定与归一(视作 rename 还是校验拒绝)也在该处定。
-- POCO 类型面下 resident 实例语义的承载(同 guid 恒同实例、missing 态的暴露方式:注册表/弱表/生成 partial 成员)→ 模块 5(D4/Δ11)。
-- Play Mode 下 AssetDatabase 写回与 RuntimeDatabase 热载的接线、ChangeSet 与 `workbookImported` 的派发次序 → 模块 5 / Unity adapter。
-- `FindAssets` 的 label/ref 反查索引与性能预算、`OpenAsset` 行定位实现 → 实施文档 / Unity adapter。
+- workbook 物理契约、metadata、RowRef token 与行身份关系 → M5(总纲 OD1 仍开放;纯 Excel 新行固化按 M5§9.2/M6§6.4)。
+- 导入、诊断、快照、SO/Undo/EditorUtility 与 key 直改归一 → M6。
+- POCO resident/missing 承载与 Play Mode 发布接线 → M7。
+- `FindAssets` 的 label/ref 反查索引与性能预算、`OpenAsset` 行定位属于 M2/M4/M7 契约的实现,不得由归档实施文档补充语义。
 
 ## 12. 决策记录
 
