@@ -1,6 +1,6 @@
 # 模块 1:Schema 契约
 
-状态:本文是逐模块重推演的第 1 篇,取代 `exceldb-lean-plan.md` §4 的 C# 特性方案。声明方式 = `.proto` + exceldb options;生成的 C# 类型是消费层投影,不是事实源。后续模块引用本文记作 M1§x。编号顺延(2026-07-09,2026-07-10 再顺延):第 2 篇为 AssetDatabase 门面(`02-assetdatabase.md`),第 3 篇为工作流(`03-workflow.md`);本文所称模块 2/3/4/5(workbook 与身份/导入与编辑/运行时/兼容)现为模块 4/5/6/7。
+状态:本文是逐模块重推演的第 1 篇,取代 `exceldb-lean-plan.md` §4 的 C# 特性方案。声明方式 = `.proto` + exceldb options;生成的 C# 类型是消费层投影,不是事实源。后续模块引用本文记作 M1§x。编号顺延(2026-07-09/07-10/07-11):第 2 篇为 AssetDatabase 门面(`02-assetdatabase.md`),第 3 篇为工作流(`03-workflow.md`),第 4 篇为集成工具(`04-integration-tools.md`);本文所称模块 2/3/4/5(workbook 与身份/导入与编辑/运行时/兼容)现为模块 5/6/7/8。
 
 ## 1. 声明方式与身份规则
 

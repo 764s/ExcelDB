@@ -1,6 +1,6 @@
 # ExcelDB 精简计划(核推演版)
 
-> 模块化重推演进行中:schema 契约以 `docs/modules/01-schema.md` 为准(声明方式 = `.proto` + exceldb options,数字 id 身份),本文 §4 的 C# 特性方案作废;AssetDatabase 门面以 `docs/modules/02-assetdatabase.md` 为准,本文 §6.7 作废;生成类型为普通 C# 类,不派生 `Object`/`ScriptableObject`(M2 D4/Δ11),本文 §7.1 的基类模型与核 1 所列 `Object`/`ScriptableObject` facade 照此修订(resident/missing 语义保留,承载方式待模块 6(运行时));工作流编排以 `docs/modules/03-workflow.md`(M3)为准:§10 命令族新增 `diff`(M3§8),§6.6 计划分级追加"新建 workbook = safe / 新表落点歧义 = blocker"两行(M3§4);其余章节在对应模块文档落地前继续有效。
+> 模块化重推演进行中:schema 契约以 `docs/modules/01-schema.md` 为准(声明方式 = `.proto` + exceldb options,数字 id 身份),本文 §4 的 C# 特性方案作废;AssetDatabase 门面以 `docs/modules/02-assetdatabase.md` 为准,本文 §6.7 作废;生成类型为普通 C# 类,不派生 `Object`/`ScriptableObject`(M2 D4/Δ11),本文 §7.1 的基类模型与核 1 所列 `Object`/`ScriptableObject` facade 照此修订(resident/missing 语义保留,承载方式待模块 7(运行时));工作流编排以 `docs/modules/03-workflow.md`(M3)为准:§10 命令族新增 `diff`(M3§8),§6.6 计划分级追加"新建 workbook = safe / 新表落点歧义 = blocker"两行(M3§4);集成工具以 `docs/modules/04-integration-tools.md`(M4,场景 × 使用者矩阵驱动)为准:CLI 为工作空间管理工具(选项式门面 + `ExcelDb.Workspace.json`,M4§3),§10 命令族补 `normalize`、公共参数增 `--project`/`--workspace`(`--schema`/`--workbooks` 转覆盖项,M4§3.4),§11 的菜单/浏览器/picker/冲突对话框工具面照 M4§4 细化;其余章节在对应模块文档落地前继续有效。
 
 ## 0. 度量口径
 
