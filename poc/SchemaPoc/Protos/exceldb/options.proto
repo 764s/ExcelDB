@@ -43,12 +43,15 @@ enum ExprResult {
   EXPR_BOOL = 2;
 }
 
-// 数据出包策略。
+// legacy 单投影出包策略;保留原 field number 供旧 proto 迁移。
 enum ExportPolicy {
   EXPORT_DEFAULT = 0;           // 继承上级
-  EXPORT_ALL = 1;
-  EDITOR_ONLY = 2;
+  EXPORT_ALL = 1;               // 固定映射到 client + server
+  EDITOR_ONLY = 2;              // 映射到显式空 target 集
 }
+
+// runtime 导出目标集合。message presence 区分“继承”与“显式空/editor-only”。
+message ExportTargetSet { repeated string ids = 1; }
 
 message TableOpts {
   TableKind kind = 1;
@@ -56,8 +59,10 @@ message TableOpts {
   repeated string implements = 3;   // 引用组
   string display_name = 4;
   string sheet_name = 5;            // 默认 = message 名
-  ExportPolicy export = 6;
+  ExportPolicy export = 6 [deprecated = true];
   repeated string validators = 7;   // 行级校验器 id,宿主代码注册
+  bool retired = 8;                 // 已发布 ASSET 的永久 tombstone
+  ExportTargetSet export_targets = 9;
 }
 
 message ExpressionOpts { string symbols_type = 1; ExprResult result = 2; }
@@ -102,8 +107,9 @@ message FieldOpts {
   CellFormat format = 17;
   ExpressionOpts expression = 18;
   WeightedOpts weighted = 19;
-  ExportPolicy export = 20;
+  ExportPolicy export = 20 [deprecated = true];
   string map_key_enum = 21;
+  ExportTargetSet export_targets = 22;
 }
 
 message EnumValueOpts { string display_name = 1; repeated string aliases = 2; }

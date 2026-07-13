@@ -49,7 +49,13 @@ message ItemStack {
 }
 
 message ItemConfig {
-  option (exceldb.table) = { kind: ASSET, id: 102, display_name: "物品" };
+  // target 顺序不参与语义;compiler 物化为 ordinal 顺序 client/server。
+  option (exceldb.table) = {
+    kind: ASSET,
+    id: 102,
+    display_name: "物品",
+    export_targets: { ids: ["server", "client"] }
+  };
 
   CommonHeader common = 1 [(exceldb.field) = { expand: EXPANDED_COLUMNS }];
   int32 max_stack = 2 [(exceldb.field) = { display_name: "堆叠上限", default_value: "99", min: 1, max: 9999 }];
@@ -62,15 +68,15 @@ message SkillConfig {
   int32 damage = 2 [(exceldb.field) = { display_name: "伤害", header_comment: "基础伤害值", min: 0, max: 9999, default_value: "10" }];
   DamageType damage_type = 3 [(exceldb.field) = { display_name: "伤害类型" }];
   Cost cost = 4 [(exceldb.field) = { expand: EXPANDED_COLUMNS, display_name: "消耗" }];
-  repeated float tick_times = 5 [(exceldb.field) = { display_name: "跳字节奏" }];
+  repeated float tick_times = 5 [(exceldb.field) = { display_name: "跳字节奏", export_targets: {} }];
   repeated SkillLevel levels = 6 [(exceldb.field) = { display_name: "等级成长" }];
   exceldb.RowRef next_rank = 7 [(exceldb.field) = { ref_table: "SkillConfig", display_name: "下一级" }];
-  exceldb.UnityResourceRef icon = 8 [(exceldb.field) = { display_name: "图标" }];
-  exceldb.Curve damage_by_level = 9 [(exceldb.field) = { display_name: "等级曲线" }];
-  string crit_formula = 10 [(exceldb.field) = { display_name: "暴击公式", expression: { symbols_type: "game.CritSymbols", result: EXPR_FLOAT } }];
+  exceldb.UnityResourceRef icon = 8 [(exceldb.field) = { display_name: "图标", export_targets: { ids: "client" } }];
+  exceldb.Curve damage_by_level = 9 [(exceldb.field) = { display_name: "等级曲线", export: EDITOR_ONLY }]; // legacy 映射自检
+  string crit_formula = 10 [(exceldb.field) = { display_name: "暴击公式", export_targets: { ids: "server" }, expression: { symbols_type: "game.CritSymbols", result: EXPR_FLOAT } }];
   repeated DropEntry drops = 11 [(exceldb.field) = { display_name: "掉落", weighted: { weight_field: 3, condition_field: 4 } }];
   map<string, float> resist_decay = 12 [(exceldb.field) = { display_name: "抗性衰减" }];
-  repeated ItemStack rewards = 13 [(exceldb.field) = { display_name: "奖励", format: { join: { separators: ["#", "&"] } } }];
+  repeated ItemStack rewards = 13 [(exceldb.field) = { display_name: "奖励", export: EXPORT_ALL, format: { join: { separators: ["#", "&"] } } }]; // legacy 映射自检
   oneof effect {
     DamageEffect effect_damage = 20;
     DotEffect effect_dot = 21;

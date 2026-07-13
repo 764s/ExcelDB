@@ -46,6 +46,7 @@ public sealed class FieldDesc
     public string MapKeyType = "", MapValueType = "";
     public List<FieldDesc> Children = new();     // struct 展开/子表元素/union variants
     public string UnionName = "";                // union(oneof)名
+    public string[] ExportTargets = [];           // 已物化、ordinal 排序的 runtime target 集
 }
 
 public sealed class TableDesc
@@ -56,7 +57,10 @@ public sealed class TableDesc
     public string DisplayName = "";
     public string SheetName = "";
     public bool IsAsset;
+    public bool Retired;
+    public string[] Implements = [];
     public string[] Validators = [];
+    public string[] ExportTargets = [];           // 已物化、ordinal 排序的 runtime target 集
     public List<FieldDesc> Fields = new();
     public List<FieldDesc> KeyFields = new();
 }

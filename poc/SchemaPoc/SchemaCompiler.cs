@@ -9,6 +9,9 @@ namespace SchemaPoc;
 /// <summary>proto → descriptor set → SchemaDesc(模块 1 §5 管线的 PoC)。</summary>
 public static class SchemaCompiler
 {
+    static readonly string[] DefaultExportTargets = ["client", "server"];
+    static readonly HashSet<string> KnownExportTargets = new(DefaultExportTargets, StringComparer.Ordinal);
+
     // ---------- protoc ----------
 
     public static string LocateProtoc()
@@ -76,7 +79,7 @@ public static class SchemaCompiler
             if (!fullName.StartsWith("game.") || msg.Options?.MapEntry == true) continue;
             if (msg.Options?.GetExtension(OptionsExtensions.Table) != null) continue;
             var shape = new TableDesc { Name = msg.Name, FullName = fullName, DisplayName = msg.Name, IsAsset = false };
-            BuildFields(schema, index, fileDefaults, msg, fullName, shape.Fields);
+            BuildFields(schema, index, fileDefaults, msg, fullName, DefaultExportTargets, shape.Fields);
             schema.Shapes.Add(shape);
         }
 
@@ -94,21 +97,26 @@ public static class SchemaCompiler
                 DisplayName = opts.DisplayName.Length > 0 ? opts.DisplayName : msg.Name,
                 SheetName = opts.SheetName.Length > 0 ? opts.SheetName : msg.Name,
                 IsAsset = opts.Kind == TableKind.Asset,
+                Retired = opts.Retired,
+                Implements = opts.Implements.ToArray(),
                 Validators = opts.Validators.ToArray(),
+                ExportTargets = opts.Retired ? [] : ResolveTableExportTargets(schema, opts, msg.Name),
             };
             if (opts.Kind == TableKind.Unspecified)
                 schema.Lints.Add($"[blocker] XDB015 {msg.Name}: table option 的 kind 未显式指定");
             if (table.IsAsset && opts.Id == 0)
                 schema.Lints.Add($"[blocker] XDB001 {msg.Name}: ASSET 表缺 id");
 
-            BuildFields(schema, index, fileDefaults, msg, fullName, table.Fields);
+            BuildFields(schema, index, fileDefaults, msg, fullName, table.ExportTargets, table.Fields);
             CollectKeys(table.Fields, "", table.KeyFields, schema, table);
-            if (table.IsAsset && table.KeyFields.Count == 0)
+            if (table.IsAsset && !table.Retired && table.KeyFields.Count == 0)
                 schema.Lints.Add($"[blocker] XDB002 {msg.Name}: ASSET 表无 key 字段");
             schema.Tables.Add(table);
         }
         if (schema.Tables.GroupBy(t => t.Id).Any(g => g.Count() > 1))
             schema.Lints.Add("[blocker] XDB001 表 id 重复");
+
+        ValidateReferenceTargets(schema);
 
         foreach (var (full, e) in index.Enums.OrderBy(kv => kv.Key, StringComparer.Ordinal))
         {
@@ -137,7 +145,14 @@ public static class SchemaCompiler
         foreach (var e in msg.EnumType) index.Enums[$"{full}.{e.Name}"] = e;
     }
 
-    static void BuildFields(SchemaDesc schema, TypeIndex index, SchemaDefaults? defaults, DescriptorProto msg, string msgFullName, List<FieldDesc> output)
+    static void BuildFields(
+        SchemaDesc schema,
+        TypeIndex index,
+        SchemaDefaults? defaults,
+        DescriptorProto msg,
+        string msgFullName,
+        string[] inheritedExportTargets,
+        List<FieldDesc> output)
     {
         // oneof 分组
         var unionFields = new Dictionary<int, FieldDesc>();
@@ -155,22 +170,30 @@ public static class SchemaCompiler
                         UnionName = msg.OneofDecl[f.OneofIndex].Name,
                         Shape = ValueShape.Union,
                         DisplayName = msg.OneofDecl[f.OneofIndex].Name,
+                        ExportTargets = inheritedExportTargets.ToArray(),
                     };
                     unionFields[f.OneofIndex] = union;
                     output.Add(union);
                 }
-                target = BuildField(schema, index, defaults, f, msgFullName);
+                target = BuildField(schema, index, defaults, f, msgFullName, inheritedExportTargets);
                 union.Children.Add(target);
                 continue;
             }
-            target = BuildField(schema, index, defaults, f, msgFullName);
+            target = BuildField(schema, index, defaults, f, msgFullName, inheritedExportTargets);
             output.Add(target);
         }
     }
 
-    static FieldDesc BuildField(SchemaDesc schema, TypeIndex index, SchemaDefaults? defaults, FieldDescriptorProto f, string ownerFullName)
+    static FieldDesc BuildField(
+        SchemaDesc schema,
+        TypeIndex index,
+        SchemaDefaults? defaults,
+        FieldDescriptorProto f,
+        string ownerFullName,
+        string[] inheritedExportTargets)
     {
         var opts = f.Options?.GetExtension(OptionsExtensions.Field);
+        var exportTargets = ResolveFieldExportTargets(schema, opts, inheritedExportTargets, $"{ownerFullName}.{f.Name}");
         var d = new FieldDesc
         {
             Id = f.Number,
@@ -192,7 +215,12 @@ public static class SchemaCompiler
             ExprResult = opts?.Expression != null ? opts.Expression.Result.ToString() : "",
             WeightField = opts?.Weighted?.WeightField ?? 0,
             ConditionField = opts?.Weighted?.ConditionField ?? 0,
+            ExportTargets = exportTargets,
         };
+
+        var outsideParent = exportTargets.Except(inheritedExportTargets, StringComparer.Ordinal).ToArray();
+        if (outsideParent.Length > 0)
+            schema.Lints.Add($"[blocker] XDB016 {ownerFullName}.{f.Name}: export target [{string.Join(",", outsideParent)}] 不属于上级 target 集");
 
         var typeName = f.TypeName.TrimStart('.');
         switch (f.Type)
@@ -221,7 +249,7 @@ public static class SchemaCompiler
             {
                 d.TypeName = typeName;
                 var target = index.Messages[typeName];
-                BuildFields(schema, index, defaults, target, typeName, d.Children);
+                BuildFields(schema, index, defaults, target, typeName, d.ExportTargets, d.Children);
                 if (d.Repeated)
                 {
                     var joinLayers = opts?.Format?.Join?.Separators.Count ?? 0;
@@ -269,6 +297,69 @@ public static class SchemaCompiler
         return d;
     }
 
+    static string[] ResolveTableExportTargets(SchemaDesc schema, TableOpts opts, string owner)
+    {
+        if (opts.ExportTargets != null)
+        {
+            if (opts.Export != ExportPolicy.ExportDefault)
+                schema.Lints.Add($"[blocker] XDB020 {owner}: legacy export 与 export_targets 不能同时声明");
+            return NormalizeExportTargets(schema, opts.ExportTargets.Ids, owner);
+        }
+
+        return opts.Export switch
+        {
+            ExportPolicy.EditorOnly => [],
+            ExportPolicy.ExportAll or ExportPolicy.ExportDefault => DefaultExportTargets.ToArray(),
+            _ => DefaultExportTargets.ToArray(),
+        };
+    }
+
+    static string[] ResolveFieldExportTargets(SchemaDesc schema, FieldOpts? opts, string[] inherited, string owner)
+    {
+        if (opts?.ExportTargets != null)
+        {
+            if (opts.Export != ExportPolicy.ExportDefault)
+                schema.Lints.Add($"[blocker] XDB020 {owner}: legacy export 与 export_targets 不能同时声明");
+            return NormalizeExportTargets(schema, opts.ExportTargets.Ids, owner);
+        }
+
+        return opts?.Export switch
+        {
+            ExportPolicy.EditorOnly => [],
+            ExportPolicy.ExportAll => DefaultExportTargets.ToArray(),
+            _ => inherited.ToArray(),
+        };
+    }
+
+    static string[] NormalizeExportTargets(SchemaDesc schema, IEnumerable<string> ids, string owner)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var id in ids)
+        {
+            if (!seen.Add(id))
+            {
+                schema.Lints.Add($"[blocker] XDB020 {owner}: 重复 export target '{id}'");
+                continue;
+            }
+
+            if (!IsValidExportTargetId(id) || !KnownExportTargets.Contains(id))
+                schema.Lints.Add($"[blocker] XDB020 {owner}: 非法或未知 export target '{id}'");
+        }
+        return seen.OrderBy(id => id, StringComparer.Ordinal).ToArray();
+    }
+
+    static bool IsValidExportTargetId(string id)
+    {
+        if (id.Length == 0 || id[0] is < 'a' or > 'z') return false;
+        for (var i = 1; i < id.Length; i++)
+        {
+            var c = id[i];
+            if (c is >= 'a' and <= 'z' || c is >= '0' and <= '9' || c == '-') continue;
+            return false;
+        }
+        return true;
+    }
+
     static FormatSpec ToSpec(CellFormat f) => f.KindCase switch
     {
         CellFormat.KindOneofCase.Join => new FormatSpec { Kind = FormatKind.Join, Separators = f.Join.Separators.ToArray() },
@@ -313,11 +404,61 @@ public static class SchemaCompiler
             {
                 if (f.Shape is not (ValueShape.Scalar or ValueShape.Enum))
                     schema.Lints.Add($"[blocker] XDB004 {table.Name}.{path}: key 落在非标量字段");
+                var missingTargets = table.ExportTargets.Except(f.ExportTargets, StringComparer.Ordinal).ToArray();
+                if (missingTargets.Length > 0)
+                    schema.Lints.Add($"[blocker] XDB016 {table.Name}.{path}: key 未覆盖表 target [{string.Join(",", missingTargets)}]");
                 keys.Add(f);
             }
             if (f.Shape == ValueShape.StructExpanded) CollectKeys(f.Children, path, keys, schema, table);
         }
         keys.Sort((a, b) => a.KeyOrder.CompareTo(b.KeyOrder));
+    }
+
+    static void ValidateReferenceTargets(SchemaDesc schema)
+    {
+        foreach (var table in schema.Tables.Where(t => !t.Retired))
+            ValidateReferenceFields(schema, table.Fields, table.Name);
+    }
+
+    static void ValidateReferenceFields(SchemaDesc schema, IEnumerable<FieldDesc> fields, string ownerPath)
+    {
+        foreach (var field in fields)
+        {
+            var path = $"{ownerPath}.{field.Name}";
+            if (field.Shape == ValueShape.InternalRef)
+            {
+                List<TableDesc> candidates;
+                if (field.RefTable.Length > 0)
+                {
+                    var targetName = field.RefTable.TrimStart('.');
+                    candidates = schema.Tables.Where(t => !t.Retired &&
+                        (string.Equals(t.Name, targetName, StringComparison.Ordinal) ||
+                         string.Equals(t.FullName, targetName, StringComparison.Ordinal))).ToList();
+                    if (candidates.Count != 1)
+                    {
+                        schema.Lints.Add($"[blocker] XDB007 {path}: ref_table '{field.RefTable}' 解析到 {candidates.Count} 个表");
+                        candidates.Clear();
+                    }
+                }
+                else
+                {
+                    candidates = schema.Tables.Where(t => !t.Retired &&
+                        t.Implements.Contains(field.RefGroup, StringComparer.Ordinal)).ToList();
+                    if (candidates.Count == 0)
+                        schema.Lints.Add($"[blocker] XDB007 {path}: ref_group '{field.RefGroup}' 无目标表");
+                }
+
+                foreach (var candidate in candidates)
+                {
+                    var missingTargets = field.ExportTargets.Except(candidate.ExportTargets, StringComparer.Ordinal).ToArray();
+                    if (missingTargets.Length > 0)
+                        schema.Lints.Add($"[blocker] XDB016 {path}: RowRef 目标表 {candidate.Name} 未导出 target [{string.Join(",", missingTargets)}]");
+                }
+            }
+
+            if (field.Children.Count > 0)
+                ValidateReferenceFields(schema, field.Children, path);
+        }
     }
 
     // ---------- canonical hash ----------
@@ -328,6 +469,7 @@ public static class SchemaCompiler
         foreach (var t in schema.Tables.OrderBy(t => t.Id))
         {
             sb.Append($"T{t.Id}:{t.Name}:{(t.IsAsset ? "asset" : "embedded")};");
+            WriteTargets(sb, t.ExportTargets);
             WriteFields(sb, t.Fields);
         }
         foreach (var e in schema.Enums.OrderBy(e => e.FullName, StringComparer.Ordinal))
@@ -344,6 +486,7 @@ public static class SchemaCompiler
         foreach (var f in fields.OrderBy(f => f.Id))
         {
             sb.Append($"F{f.Id}:{f.Name}:{f.Shape}:{f.TypeName}:k{f.KeyOrder}:r{(f.Required ? 1 : 0)}:u{(f.Unique ? 1 : 0)}");
+            WriteTargets(sb, f.ExportTargets);
             if (f.Min.HasValue) sb.Append($":min{f.Min}");
             if (f.Max.HasValue) sb.Append($":max{f.Max}");
             if (f.Regex.Length > 0) sb.Append($":re{f.Regex}");
@@ -356,5 +499,13 @@ public static class SchemaCompiler
             if (f.Children.Count > 0) { sb.Append('['); WriteFields(sb, f.Children); sb.Append(']'); }
             sb.Append(';');
         }
+    }
+
+    static void WriteTargets(StringBuilder sb, IEnumerable<string> targets)
+    {
+        sb.Append(":targets[");
+        foreach (var target in targets.OrderBy(t => t, StringComparer.Ordinal))
+            sb.Append(target.Length).Append('#').Append(target).Append(',');
+        sb.Append(']');
     }
 }

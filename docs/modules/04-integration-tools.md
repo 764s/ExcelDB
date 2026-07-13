@@ -10,7 +10,7 @@
   2. 工具条目(§3-§6)必须被至少一格引用;无格引用的工具 = 幽灵工具,删除(唯一豁免:C11 隐藏测试基建,不属团队工具面)。
   3. 新场景先加行、再配工具;新工具先找格、再写规格。
 - 格值域(图例):`G1/C/U/I/V+编号` = §3-§6 工具条目(`G1` = §3 Project 主引导);`烘焙` = generate 写进 workbook 的产物(下拉/批注/数据有效性,P§5.1),使用时无运行工具;`P§x 钩子` = 自动机制承担,无人工工具(如构建钩子);`API` = 库 API 直接消费,无工具面(游戏侧 UI 归宿主);`→WFn` = 角色交接,不是工具;`约定` = 团队纪律(M3);`✗n` = 显式不提供(§9 行 n);空 = 该使用者不参与。
-- 矩阵覆盖全部工作流时刻,G1 只覆盖“从空目录到 C# 类型 + Excel 数据 + bytes/manifest”的三阶段程序主线;矩阵非空不等于该场景必须进入 G1。Runtime Open、应用方写回/冲突、Play 调参、CI 与 VCS 评审各走自己的 API/U/I/V 入口。
+- 矩阵覆盖全部工作流时刻,G1 只覆盖“从空目录到 C# 类型 + Excel 数据 + client bytes/manifest”的三阶段程序主线;矩阵非空不等于该场景必须进入 G1。server/未来目标发布、Runtime Open、应用方写回/冲突、Play 调参、CI 与 VCS 评审各走自己的 API/U/I/V 入口。
 - 投影原则:工具的每个领域动作必须映射到机制文档已有的操作与 API,同一操作跨入口走同一管线、产同一 OperationReport(M3§2);G1 三阶段只组合既有命令并逐条回显,自身只负责导航,不增加领域操作语义(§3.1);UI 可以加糖(如 Browser 搜索扩展),糖不回写 API 语义。
 - 失败形态沿用 M2§1:失败返回 + Diagnostic,无静默 no-op;对话框"取消"= 操作中止、零写入。失败的呈现位置按 §8 映射。
 
@@ -33,22 +33,22 @@
 | S13 | 危险时机拦截:编译/进 Play/退出/卸载(WF4) | U8 | U8 | | | |
 | S14 | 进 Play 选源与陈旧检测(WF5) | U9,U13 | U9,U13 | | | |
 | S15 | 运行中改 Excel 热载(WF5) | U13 | U13 | | | API |
-| S16 | convert 后切 bytes 复验(WF5) | U2,U13 | C8,U2,U13 | | | |
+| S16 | client convert 后切 bytes 复验(WF5) | U2,U13 | C8,U2,U13 | | | |
 | S17 | Development 构建现场调数(WF5) | | | | | ✗2,API |
 | S18 | 同书并行写的预防(WF6) | 约定 | 约定 | | | |
 | S19 | 提交前自查改动(WF6) | U12,V2 | C9,V2 | | | |
 | S20 | PR 评审 xlsx 变更(WF6) | | | I5 | I5 | |
 | S21 | 版本冲突对账重做(WF6) | U3 + I5/C9 报告 | C9,V2 | | | |
-| S22 | 门禁与工件(WF7) | | | | I1-I7 | |
-| S23 | 构建出包(WF7) | | U2 + 构建钩子(P§11) | | I4 | |
-| S24 | 线上数据补丁(WF7) | | C8 | | I4 | API |
-| S25 | 运行时数据排查:来源与版本(WF7) | | | | | API + manifest(P§7.4) |
+| S22 | client/server 门禁与分目标工件(WF7) | | | | I1-I7 | |
+| S23 | 构建按 target 出包(WF7) | | U2(client) + 构建钩子(P§11) | | I4 | |
+| S24 | 线上数据补丁按 target 隔离(WF7) | | C8 | | I4 | API |
+| S25 | 运行时数据排查:来源、target 与版本(WF7) | | | | | API + manifest(P§7.4) |
 
 - S6:填表时刻的"工具"就是 generate 烘焙进表的下拉/批注/数据有效性;运行期工具为零是设计而非缺口(✗1)。
 - S8:纯 Excel 工作面接受延迟反馈(pre-commit/CI 兜底)——即时校验只能靠 Excel 插件,已裁(✗1);此格是全矩阵唯一的"事后反馈"格,D5。
 - S18:拆书降低相撞 + 认领约定(M3§8);不做工具锁(ADR-12),此格永远是"约定"。
-- S17/S25:游戏列的工具面 = API + manifest 伴生 json(直接可读),库不提供游戏内 UI(✗2);ChangeSet 订阅、显式 Open 见 P§7.2/§7.8。
-- G1 对应 S1/S3/S6/S10 的三阶段主线;这些格也保留 C/U 直达入口。S16 的 Runtime Open/切源复验不因 G1 调用 convert 而并入主线;C9 `diff` 仅供 VCS-only 接线,C8 线上补丁等特殊发布直接用子命令;CI/脚本始终不用 G1(非 TTY 拒绝,§3.1)。
+- S17/S25:游戏列的工具面 = API + 带 export target 的 manifest 伴生 json(直接可读),库不提供游戏内 UI(✗2);ChangeSet 订阅、同 target 显式 Open 见 P§7.2/§7.8。
+- G1 对应 S1/S3/S6/S10 的三阶段主线;这些格也保留 C/U 直达入口。G1 与 Unity `Convert` 都只调用 client C8,S16 的 Runtime Open/切源复验不因 G1 调用 convert 而并入主线;server/未来目标、C8 线上补丁等发布场景直接用显式 target 子命令,C9 `diff` 仅供 VCS-only 接线;CI/脚本始终不用 G1(非 TTY 拒绝,§3.1)。
 
 ## 3. CLI:Project 管理工具
 
@@ -57,21 +57,21 @@
 ### 3.1 三阶段线性 Project 主引导(G1)
 
 - 最简入口:把当前平台的 `exceldb` 单文件可执行程序放进空目录并运行。无 Project + TTY → G1 阶段 1;已有 Project + TTY → 从事实重算后续阶段;非 TTY 无子命令 → 打印用法,退出码 3。
-- G1 固定顺序为 `Project 初始化 → 创建/调整 Excel 表结构并生成 C# → 填写 Excel 后准备并导出数据`。它不是场景菜单,也不保存私有进度;Project、proto、生成代码、xlsx、报告与 bytes/manifest 是唯一完成证据。
+- G1 固定顺序为 `Project 初始化 → 创建/调整 Excel 表结构并生成 C# → 填写 Excel 后准备并导出 client 数据`。它不是场景菜单,也不保存私有进度;Project、proto、生成代码、xlsx、报告与 client bytes/manifest 是唯一完成证据。
 - G1 每个产品操作都回显并调用公开子命令(C1/C2/C3/C4/C5/C10/C7/C8),不存在界面专属写入。C1/C3-C6/C10 的交互入口只收集一次意图,展示不可变 MutationPlan 后确认并应用同一内存计划(§3.4);失败保留旧工件。
 - `:` 可临时进入子命令细节,完成后返回当前阶段;`q` 退出。可执行文件本身不是 Project 工件或事实源,可以移动、替换或删除;Project 只依赖版本化文件与可重建缓存。
-- 阶段 2 按工件事实恢复而不是盲重跑向导:无 proto 才进入 `table create`;proto 已存在但 descriptor/C# stale 时运行 `schema build`;xlsx 缺失或结构 stale 时运行 `generate`;`table edit` 只是阶段内可选、可重复的显式结构调整。
-- 阶段 3 包含一次明确的人工作面交接:工具展示待填 xlsx,用户在 Excel 中生产数据并保存,返回后显式运行 `data prepare → check → convert`。工具不虚构业务值,`check`/`convert` 也不暗中补身份。
+- 阶段 2 按工件事实恢复而不是盲重跑向导:无 proto 才进入 `table create`;proto 已存在但 descriptor/C# stale 时运行 `schema build`;xlsx 缺失或结构 stale 时运行 `generate`;`table edit` 只是阶段内可选、可重复的显式结构调整。首次 `table create` 只采集 workbook、表名、简单 key/字段、每字段 client/server 勾选与少量封闭自动选项,完整结构由 §3.3 的表初始化器和导出目标策略展开后在计划中一次确认并显式落 proto。
+- 阶段 3 包含一次明确的人工作面交接:工具展示待填 xlsx,用户在 Excel 中生产数据并保存,返回后显式运行 `data prepare → check → convert`；裸 `convert` 固定等价 client → `bytesOutput`。工具不虚构业务值,`check`/`convert` 也不暗中补身份；若 proto 含 server 导出面,完成摘要只提示显式 server 命令,不在 G1 中替用户选择发布路径。
 - Runtime Open、应用方写回/冲突、Play 切源、Git diff/PR、CI 与发布分发不进入 G1;它们继续使用各自 API/U/V/I 入口。
 
 | 阶段 | 完成条件 | G1 回显的公开管线 |
 | --- | --- | --- |
 | 1. Project 初始化 | `ExcelDb.Project.json` 合法且配置所指默认目录存在;schema/workbook 可为空 | `init .`(内存计划 → 确认 → apply;已有合法 Project 校验/no-op或补目录) |
-| 2. 创建/调整 Excel 表结构并生成 C# | 至少一张 live ASSET 表的 proto、C# 与 xlsx 结构一致,descriptor/cache 可从当前 proto 重建 | 无 proto → `table create`;C#/descriptor stale → `schema build`;xlsx missing/stale → `generate`;按需重复 `table edit`;必要时 `normalize` |
-| 3. 填写 Excel 后准备并导出数据 | Excel 已保存,不存在 pending-new 行,check 通过,bytes + manifest 对应当前 schema/data fingerprints | 展示/打开 xlsx → 等待用户继续 → `data prepare` → `check` → `convert [--out]` |
+| 2. 创建/调整 Excel 表结构并生成 C# | 至少一张 live ASSET 表的 proto、每 target C# runtime surface/registry 与 xlsx 结构一致,descriptor/cache 可从当前 proto 重建 | 无 proto → `table create`;C#/descriptor stale → `schema build`;xlsx missing/stale → `generate`;按需重复 `table edit`;必要时 `normalize` |
+| 3. 填写 Excel 后准备并导出 client 数据 | Excel 已保存,不存在 pending-new 行,check 通过,client bytes + manifest 对应当前 schema/data fingerprints | 展示/打开 xlsx → 等待用户继续 → `data prepare` → `check` → 裸 `convert`;如存在 server 面则提示 `convert --target server --out <path>` |
 
 - 已有 Project 可以跳过完成且未 stale 的阶段;跳过与恢复依据必须来自当前工件 fingerprints 和报告,不能靠口头选择或上次会话状态。
-- “对应数据”在本文中特指 xlsx authoring 数据经 convert 得到的 bytes + manifest;生成的 `.cs` 是类型/访问器投影,不把业务记录固化为另一份 C# 数据源。
+- “对应数据”在本文中特指 xlsx authoring 数据经一次 target-scoped convert 得到的一对 bytes + manifest;生成的 `.cs` 是每 target 类型/访问器/registry 投影,不把业务记录固化为另一份 C# 数据源。每 target C# 的物理目录/文件包装归 M1,M4 只投影同一 `generatedDir` 与命令结果。
 
 ### 3.2 Project 配置(`ExcelDb.Project.json`,唯一配置源)
 
@@ -90,9 +90,9 @@ Project 配置进版本控制,程序拥有;它只描述内置 Schema Tooling、C
 | 键 | 语义 | 必需/缺省 | 主要消费方 |
 | --- | --- | --- | --- |
 | `schemaDir` | proto 事实源根与 project-local import root;文件发现、确定性排序与内嵌 options 解析归 M1 | 缺省 `Schema`;初始化后可暂时无 proto | C1-C10、G1 |
-| `generatedDir` | M1 C# 类型/访问器投影目录 | 必需 | C2-C4、I2、宿主工程 |
+| `generatedDir` | M1 C# 类型/访问器及每 effective target runtime surface/registry 的投影根;目标物理包装归 M1 | 必需 | C2-C4、I2、宿主工程 |
 | `workbooks` | xlsx 数据事实源与结构投影的 glob 集 | 必需;首表创建前可匹配零文件 | C3-C10、U1 |
-| `bytesOutput` | runtime bytes 缺省输出;manifest 同行 | 必需 | C8、G1 阶段 3、构建钩子 |
+| `bytesOutput` | 默认 `client` runtime bytes 输出;client manifest 同行,绝不充当 server/其他 target 路径模板 | 必需 | C8 裸/client 调用、G1 阶段 3、Unity 构建钩子 |
 | `cacheDir` | descriptor、快照、索引、MutationPlan 与默认报告根 | 缺省 `.exceldb` | C1-C10、M6 |
 
 `init` 在新目标中创建 `ExcelDb.Project.json` 及五键所指的默认目录;不创建无表结构的空 xlsx。已有合法 Project 时它是幂等校验:已齐全则 no-op,缺少配置所指目录则计划补齐;只有非法 Project、应为目录却被文件占用、或待创建文件与不兼容现物碰撞时 blocker 2 且零覆盖。`table create <TableName>` 缺显式落点时固定写 `<schemaDir>/<TableName>.proto`;`--schema-dir` 只覆盖本次 schema 根,不产生 glob 型第二配置源。
@@ -103,18 +103,20 @@ canonical descriptor 固定派生到 `<cacheDir>/schema/descriptor.bin`,不是�
 
 Git baseline、difftool、pre-commit 与 PR 投影不属于 Project 键域;它们由 V1-V3/I5 独立提供。运行时 source/hot-reload 选择也不存 Project 或 EditorPrefs,由 M7 bootstrap/API 每次显式传入。
 
+表初始化器与导出目标策略同样不进入 Project 键域:不新增 initializer/exportStrategy/targets/bytesOutputs/template/profile/assembly/script 键,也不以另一份 JSON/YAML 声明建表或导出默认。server 与未来 target 的输出路径由显式 C8 `--out` 及宿主构建/CI 配方拥有；U11 仍只投影上述五键。
+
 ### 3.3 命令全集(命令行细节层)
 
 | # | 命令 | 语义(机制归属) | 专属参数 | 服务场景 |
 | --- | --- | --- | --- | --- |
 | C1 | `init [path]` | 幂等初始化/校验 Project 与默认目录;允许无 Project 执行 | MutationPlan(§3.4) | S1 |
-| C2 | `schema build` | 内嵌 M1 工具链:当前 proto → lint → canonical descriptor/cache → C# codegen | `--check`(C# 只比较不替换;descriptor cache 仍可重建) | S3,S5,S22 |
-| C3 | `table create [<TableName>]` | 建议/确认稳定身份;缺省写 `<schemaDir>/<TableName>.proto`,在同一计划复用 C2 编译与 C5 投影机制产 C#/xlsx | MutationPlan;`--workbook <path>` | S1,S10 |
-| C4 | `table edit [<table>]` | 字段三阶段变更或表退役;保留数字身份,在同一计划复用 C2/C5 机制同步 C#/xlsx | MutationPlan | S3,S10 |
+| C2 | `schema build` | 内嵌 M1 工具链:当前 proto → lint → canonical descriptor/cache → 为每个 effective export target 生成 C# runtime surface/registry | `--check`(C# 只比较不替换;descriptor cache 仍可重建) | S3,S5,S22 |
+| C3 | `table create [<TableName>]` | 收集简单字段/client-server 勾选/自动选项,经 M1 `ITableInitializer` 形成 draft,再由 `IExportTargetStrategy` 只补未显式 target 并把结果写进 candidate proto,最后建议/确认稳定身份;缺省写 `<schemaDir>/<TableName>.proto`,在同一计划复用 C2 编译与 C5 投影机制产 C#/xlsx | MutationPlan;`--workbook <path>` | S1,S10 |
+| C4 | `table edit [<table>]` | 字段/导出 target 三阶段变更或表退役;策略只补未显式 target,结果写 candidate proto；保留数字身份,在同一计划复用 C2/C5 机制同步 C#/xlsx | MutationPlan | S3,S10 |
 | C5 | `generate` | 把已有 schema 结构投影/修复到 workbook,不改变业务数据 | MutationPlan;`--purge` `--rekey` `--workbook <path>` | S3,S5,S10 |
 | C6 | `normalize` | legacy cell 批量重写为 canonical(M1§2) | MutationPlan | S4 |
 | C7 | `check` | 只读导入级全量校验;除可重建 cache/显式报告外不写 proto/C#/xlsx/bytes,pending-new 只报 identity error | — | S1,S3-S5,S8 |
-| C8 | `convert` | 产与当前 schema/data fingerprints 对应的 bytes + manifest;存在 pending-new 即 blocker 2 | `--out`(缺省 `bytesOutput`) | S16,S22-S24 |
+| C8 | `convert` | 一次只为一个 effective export target 产与当前 schema/data fingerprints 对应的 bytes + manifest,二者及 OperationReport 均记录 target;存在 pending-new 即 blocker 2 | `--target <id>`、`--out <path>`;裸调用 = client → `bytesOutput`,非 client 必须两者齐备 | S16,S22-S24 |
 | C9 | `diff` | **VCS-only**:两 xlsx 只读对账,不进入 G1 | 位置参数 `<base> <target>` | S19-S21(V2/I5) |
 | C10 | `data prepare` | 为 pending-new 行显式固化系统身份;只写系统 `__guid`,业务值逐 cell 不变 | MutationPlan;`--workbook <path>` | S6 |
 | C11 | `fixture` | 隐藏子命令:测试 fixture 构建,非公开产品契约 | — | —(测试基建) |
@@ -123,6 +125,25 @@ Git baseline、difftool、pre-commit 与 PR 投影不属于 Project 键域;它�
 - C3 的 `TableName` 与 C4 的 `table` 在收集/生成计划时必需(交互可询问);仅 `<command> --apply-plan <path>` 从计划读取目标并省略位置参数。apply 时重新传位置参数属于改变意图,用法错误 3。
 - C3/C4 的候选 proto、descriptor、C# 与 xlsx 先写临时区并整体校验;任一步失败均不替换旧工件。C2 只更新可重建 descriptor/cache 与 C#。数字身份分配、reserved/retired 与兼容语义归 M1/M8,G1 不另解释。
 - C10 的计划绑定 schema hash、目标 workbook fingerprint 与每个 pending-new 行 fingerprint;apply 只为这些行写入计划内确定的 `__guid`。它不得规范化、补默认值或改写任一业务 cell。C7 只投 Diagnostic,C8 遇 pending-new 必须拒绝,二者都不得隐式调用 C10。
+- C8 的目标/路径规则封闭为:省略 `--target` 时 target 固定为 `client`,省略 `--out` 时只对 client 使用 Project `bytesOutput`;显式 `--target client` 仍可省略 `--out`。任何非 client target 都必须显式同时给出 `--target <id> --out <path>`。单次命令只接受一个 target,不接受重复/逗号列表、`all` 或从输出路径推断 target；非法组合是用法错误 3 且零产物。一次失败只保留该 target 的旧 bytes+manifest,不得触碰其他 target 工件；跨 target 的整体发布原子性由 CI staging 负责。
+- C8 的 manifest 与 OperationReport 至少明确记录 effective target、实际 bytes/manifest 路径、schema/data fingerprint 与结果；输出路径不反向定义 target。`--json` 始终是本次单 target OperationReport,不是多目标汇总。G1/Unity 菜单只调用 client 形态,server 与未来目标只走显式 CLI/构建接线。
+
+#### C3 表初始化输入与扩展点
+
+`table create` 的默认交互只收集目标 workbook、表名、显式 key 或 `AutoKey`、零个或多个首批简单字段、每字段“客户端/服务端”两个勾选,以及少量封闭的强类型自动选项。本入口的“简单字段”固定为 M1§3 的 singular Scalar 或引用已有 Enum 形状;key 仍必须满足 M1 标量约束。v1 必备自动选项仅封闭为 `AutoKey`:当用户未给显式 key 时,确定性添加 `id:string` 并标为 key;与显式 key 同时给出是用法错误。新增任何内置自动选项必须先在本节登记强类型语义与验收,不得放开任意 key/value 选项袋。C3 固定创建 live ASSET,initializer 必须把 `kind=ASSET` 显式写入 candidate proto;`sheet_name=TableName` 是 M1 effective default,字段 export targets 则统一交给下述策略补齐/物化,不得成为 initializer 的第二默认规则。所有自动项、effective defaults、用户勾选与最终 effective targets 必须在确认前逐项可见;实际写入仍以 M1 canonical proto 规则为准。复杂 message/repeated/map/oneof/ref/codec、辅助类型定义与已有表演进/迁移不进首次建表表单或 initializer,只由 `table edit` 或直接编辑 proto 完成。
+
+实现必须以 M1 `ITableInitializer` 抽象“简单输入/选项 → table-local draft”。默认实现是 `DefaultTableInitializer`;定制 Schema Tooling 发行物可以在自身 composition root 显式注册普通 C# 实现。initializer 不得拥有 UI/Console/文件选择语义,不得直接写 proto/C#/xlsx/cache、分配最终身份或提交计划;其 draft 仍由 M1 统一形成 candidate proto、lint/codegen,并由 C3 冻结为不可变 MutationPlan。异常或非法 draft 产生 blocker 且零领域写入。
+
+initializer 只在计划冻结前运行;计划保存已解析的完整 mutation,不保存“稍后再执行 initializer”的 recipe。`--apply-plan` 不得加载或重跑 initializer。提交后的 build/generate/check/convert 与 cache 重建只依赖 proto;缺少或更换 initializer 不得让已有表漂移。
+initializer `Id` 只用于计划构造期 Diagnostic/人读审计投影;plan apply 不得解析、查找或比较 initializer 注册/`Id`/版本。
+
+#### C3/C4 字段导出目标与策略扩展点
+
+标准 UI 不要求用户输入 target id、掩码或任意声明片段；每个字段只显示 `客户端`、`服务端` 两个勾选,默认两者均选。显式勾选属于用户结构意图,策略不得覆盖；initializer 新增或用户选择“自动”而尚未显式给 target 的字段,由 M1 `IExportTargetStrategy` 在 C3/C4 plan 构造期补齐。标准发行物注册 `StandardClientServerExportTargetStrategy`,其标准结果是 client+server；key、引用闭包及无 target 等合法性仍由 M1 lint 裁决,工具层不发明例外。
+
+策略输出必须在计划预览中按表/字段逐项展开,确认后完整写进 candidate proto。冻结的 MutationPlan 保存已解析 mutation,不保存“apply 时再运行策略”的 recipe；`--apply-plan`、提交后的 C2/C5-C8、cache 重建与 runtime 均不得加载或重跑策略。策略 `Id` 只进入计划构造期 Diagnostic/人读审计,不进入 plan replay 条件。直接编辑与策略产生相同 proto 时,下游 codegen/convert 必须相同。
+
+定制 Schema Tooling 可以在自身 composition root 以普通 C# 显式注册自定义 `IExportTargetStrategy`,例如增加未来 `lite-client` 目标；它只能补未显式 target 并操作当前 create/edit draft,不得拥有 UI、Project 键、输出路径、manifest、convert IO 或 runtime 语义。标准 CLI 不扫描项目 `.cs`/程序集、不动态发现策略,也不建设 targets/profile/JSON/YAML 声明层；一旦结果落 proto,缺失或更换该策略不得改变已有表的 build/generate/check/convert。
 
 ### 3.4 通用不可变 MutationPlan
 
@@ -134,11 +155,13 @@ C1/C3/C4/C5/C6/C10 的全部领域写入共享同一种 canonical `MutationPlan`
 - 执行固定为 `<command> --apply-plan <path>`:不得再接收会改变意图的 table/field/workbook/`--purge`/`--rekey` 参数。工具验证 `planHash` 后逐项复核全部 fingerprints;任一不匹配即 stale blocker 2、零领域写入,必须重新产计划。
 - plan 文件是可丢弃的操作证据,不是事实源或 Project 配置。apply 成功后仍以 proto/xlsx 等正式工件为准;交互内存计划与序列化计划必须产生逐项等价的 mutation/report。
 - 禁止把 `--dry-run` 后不带 plan 重跑同一意图命令当作 apply;该形态会重新观察输入,不具备用户已确认的对象身份。
+- C3 initializer 只属于“收集意图 → 冻结计划”的前半段;一旦计划冻结,交互确认、序列化和 apply 均不得因 initializer 当前状态重解释任一 mutation。
+- C3/C4 export target strategy 同样只属于计划冻结前的意图补齐；显式 target 不得被覆盖,冻结后不得因策略注册/`Id`/实现变化重解释 mutation。
 
 ### 3.5 公共参数与配置解析
 
 - Project 选择:显式 `--project <path>` 优先;未指定时从 cwd 向上查找最近的 `ExcelDb.Project.json`。无 Project 时只允许 `init`、`--help`、`--version`;无子命令 + TTY 等价进入 `init` 引导,其余命令/非 TTY 返回用法错误 3。
-- 字段解析:命令参数覆盖 > Project 字段 > §3.2 明定缺省。`--schema-dir <path>`/`--workbooks <glob>`/`--out` 分别覆盖 `schemaDir`/`workbooks`/`bytesOutput`;schema 输入只接受目录覆盖,不接受 glob override。除 §3.4 dry-run 计划外,`--json` 只决定本次报告路径,不写回 Project。缺必需字段、未知字段或非法组合 = 用法错误 3,不产领域报告。
+- 字段解析:命令参数覆盖 > Project 字段 > §3.2 明定缺省。`--schema-dir <path>`/`--workbooks <glob>` 分别覆盖 `schemaDir`/`workbooks`;C8 的 `--out` 只在 effective target 为 client 时可省略并回退 `bytesOutput`,非 client 不从 Project 推导路径。`--target` 只选择本次 C8 目标,绝不写回 Project或从 Project 读取。schema 输入只接受目录覆盖,不接受 glob override。除 §3.4 dry-run 计划外,`--json` 只决定本次单 target 报告路径,不写回 Project。缺必需字段、未知字段、`all`/多 target 或非 client 缺 `--out` = 用法错误 3,不产领域报告或 bytes/manifest。
 - 路径基准:`--project` 与 `init [path]` 的相对路径按 cwd 解析;Project 选定后,其余相对配置、参数和位置路径均按 Project 目录解析;绝对路径不变。
 - `schema build` 与所有消费 descriptor 的命令只使用随可执行文件内嵌的锁定工具链;不从 PATH、系统 SDK 或网络获取 protoc/parser/codegen。
 - `--json <path>` 与退出码 0=ok/warning、1=error、2=blocker、3=用法/环境异常;stdout 仅为人读投影,机器消费使用 OperationReport json,MutationPlan 预览则只消费 §3.4 plan 文件。
@@ -149,6 +172,7 @@ C1/C3/C4/C5/C6/C10 的全部领域写入共享同一种 canonical `MutationPlan`
 - 锁定版 proto parser/compiler、SchemaCompiler、codegen、xlsx 与 convert 能力随该文件交付。实现可在系统临时目录或 `<cacheDir>/tool/` 解包内部资源,但必须校验完整性,且这种解包不改变“一个用户交付文件”的契约。
 - `dotnet tool` 可以作为附加安装方式,不得成为主工作流前置;同版本下其命令、报告和字节产物必须与单文件形态等价。
 - 宿主工程编译生成的 `.cs` 仍使用 Unity/.NET 自己的构建链,不属于 ExcelDB 数据生产前置。可执行文件和 UPM 包独立更新,版本经 OperationReport 记录并受 workbook format/schema_hash 门禁,不建立第二配置源。
+- 标准单文件发行物内置 `DefaultTableInitializer` 与 `StandardClientServerExportTargetStrategy`,因而继续满足只有一个 exe 的离线首次闭环。自定义 C# initializer/`IExportTargetStrategy` 由受信任的定制 Schema Tooling 在自身 composition root 注册并编进定制发行物;标准 CLI 不在执行期编译/扫描项目 `.cs`,不自动发现外部程序集,也不建设插件加载/权限/签名体系。定制发行物可替换当次活动注册,但仍必须随包保留两个标准实现；策略只影响尚未冻结的 create/edit 计划,结果落 proto 后不再是 build/convert 前置。如未来需要动态加载,必须另行建立加载、信任、确定性与离线交付契约。
 
 ## 4. Unity 编辑器套件
 
@@ -159,14 +183,14 @@ C1/C3/C4/C5/C6/C10 的全部领域写入共享同一种 canonical `MutationPlan`
 | U3 | Browser 窗口 | 三栏:树(workbook → 表)\| 行列表(列 = key、display_name、状态徽标 Dirty/Conflicted/Missing/Error)\| inspector(SO/SP 驱动,门面归 M6)。搜索框 = FindAssets 文法直通(M2§4)+ display_name 子串(UI 层扩展,不进 API 文法);工具栏 = dirty/冲突/error 计数(点击开 U12)、Save All、Refresh;右键:行 = M2§5 结构操作全集 + `Open in Excel`(OpenAsset,行定位尽力,M2 Δ10),workbook 节点 = Unmount / Open in Excel / 写入 json 持久化 |
 | U4 | picker 与拖拽 | picker = FindAssets 驱动搜索窗,自动附 ref_table/ref_group 约束(M1§2);Browser 行拖拽到 RowRef 字段 = 赋值,与 picker 等价 |
 | U5 | xlsx Inspector 摘要 | 选中已挂载 xlsx(DefaultAsset)时 Inspector 显示挂载状态、表与行数、schema_hash 对照、"打开 Browser"按钮 |
-| U6 | 报告窗口与 Console 投影 | 会话报告环(缺省 100 条,不落盘);列表 = 操作 × Ok × 摘要,详情 = 诊断行(severity/code/定位/text);双击诊断 → Browser 定位行/字段,cell 级再经 Open in Excel 尽力跳转;"导出 json"= OperationReport 序列化。Console:error/blocker 每诊断一行(含定位串),warning 按操作汇总一行,info 不投影;详情恒在报告窗口 |
+| U6 | 报告窗口与 Console 投影 | 会话报告环(缺省 100 条,不落盘);列表 = 操作 × Ok × 摘要,convert 摘要必须显式显示 target 与 bytes/manifest 路径;详情 = 诊断行(severity/code/定位/text);双击诊断 → Browser 定位行/字段,cell 级再经 Open in Excel 尽力跳转;"导出 json"= OperationReport 序列化。Console:error/blocker 每诊断一行(含定位串),warning 按操作汇总一行,info 不投影;详情恒在报告窗口 |
 | U7 | 冲突对话框 | ConflictRecord 列表 + base/mine/theirs 三值预览(实施 §4.1 快照);逐条/批量 ReloadFromExcel / KeepEditorValue(M2§7);未全解 → 保存不可用 |
 | U8 | dirty 拦截对话框 | 脚本编译/进 Play/退出编辑器/卸载 workbook 前:保存/放弃/取消;有未解冲突 → 仅 解决(转 U7)/取消(M3§6、M2§3);挂接点接线归 M7 |
-| U9 | 陈旧检测对话框 | 进 Play(bytes 模式)manifest 内容 hash 不符:Convert 后进 / 直接进 / 取消(M3§7) |
+| U9 | 陈旧检测对话框 | 进 Play(bytes 模式)manifest target 不是 client 或 client 内容 hash 不符:Convert Client 后进 / 直接进 / 取消(M3§7);不得用 server manifest 证明 client 新鲜 |
 | U10 | 计划预览对话框 | Unity 的 generate/normalize/data prepare 共用同一 MutationPlan 投影:显示 plan hash、source fingerprints 与确定序 mutation;存在 blocker → Apply 禁用;`--purge`/`--rekey` 显式复选,默认关。确认后 apply 原内存计划;table create/edit 的等价计划由 CLI/G1 直接显示 |
-| U11 | Settings | Project Settings → ExcelDB(SettingsProvider):已有 `ExcelDb.Project.json` 的五键直接投影——编辑即写 json,无 EditorPrefs 副本;缺 Project 转 U1;附 schema_hash/ToolVersion 只读展示 |
+| U11 | Settings | Project Settings → ExcelDB(SettingsProvider):已有 `ExcelDb.Project.json` 的五键直接投影——编辑即写 json,无 EditorPrefs 副本;`bytesOutput` 明标“默认客户端输出”,不显示 targets/bytesOutputs/策略/服务端路径;缺 Project 转 U1;附 schema_hash/ToolVersion 只读展示 |
 | U12 | 待保存清单 | 写回计划的窗口投影(P§6.5-2):dirty 行 × 变更字段 × 旧/新 canonical 值,只读;双击跳 inspector;行级保存 = SaveAssetIfDirty 投影(M2§6),还原经 Undo;新建/删除/改名行以结构操作条目列出 |
-| U13 | 临时 source picker / Play 工具栏 | Play 前选择“下一次会话”的 source 与 hot-reload,仅存于待进入 Play 的内存请求;adapter 在 bootstrap 时把 generated registry、所选 source 与 RuntimeBootstrapOptions 一次性传给 M7。Play 中显示当前源并显式 SwitchDataSource/Enable/DisableHotReload。取消/退出即丢弃,不得写 Project、EditorPrefs 或跨 session 恢复;模式拒绝原因可见 |
+| U13 | 临时 source picker / Play 工具栏 | Play 前选择“下一次会话”的 source 与 hot-reload,Unity 工具面固定选择 generated client registry并只接受 client source；请求仅存于待进入 Play 的内存。adapter 在 bootstrap 时把同 target generated registry、source 与 RuntimeBootstrapOptions 一次性传给 M7。Play 中显示当前源/target并显式 SwitchDataSource/Enable/DisableHotReload,跨 target source 禁用且原因可见。取消/退出即丢弃,不得写 Project、EditorPrefs 或跨 session 恢复 |
 
 菜单全集(U2,是 M3 工作流的工具投影):
 
@@ -176,25 +200,27 @@ C1/C3/C4/C5/C6/C10 的全部领域写入共享同一种 canonical `MutationPlan`
 | `Refresh` | `AssetDatabase.Refresh()`(M2§3) |
 | `Save All` | `SaveAssets()`;存在未解冲突 → 打开 U7(报告照常产出) |
 | `Generate…` / `Normalize…` / `Data Prepare…` | U10 → apply 原计划 |
-| `Convert` | convert + U6 |
+| `Convert` | 固定等价裸 `convert` = client → `bytesOutput`,再开 U6;不提供 server/`all` 菜单 |
 | `Open Report` | U6 |
 | `Mount Workbook…` | 文件选择 → 会话挂载;询问是否写入 json workbooks 列表(持久化) |
 | `Settings…` | 跳转 U11 |
 
 ## 5. CI 配方
 
-M3 门禁语义的流水线化(任一阶段退出码 ≥ 1 即失败);I1/I2/I4 只消费 Project 路径与内嵌 Schema Tooling,I5 的基线与投影由 Git/CI 自己提供;G1 不进 CI,流水线一律子命令。I3 的宿主测试可使用项目自己的 SDK,但不构成 ExcelDB schema/data 生产前置。
+M3 门禁语义的流水线化(任一阶段退出码 ≥ 1 即失败);I1/I2/I4 只消费 Project 路径与内嵌 Schema Tooling,I5 的基线与投影由 Git/CI 自己提供;G1 不进 CI,流水线一律子命令。I3 的宿主测试可使用项目自己的 SDK,但不构成 ExcelDB schema/data 生产前置。I4 对标准前后端项目显式调用两次 C8,各自写 staging 路径和报告；只有两者都成功才由流水线发布,CLI 不提供 `all` 或跨 target 提交。
 
 ```text
 I1 schema     exceldb schema build --json <cacheDir>/reports/schema.json(M1 lint+descriptor+codegen)
 I2 freshness  重跑 I1 → git diff --exit-code <generatedDir>(M3§9)
 I3 test       Core/Editor 测试(含 no-GC 门禁与基准断言,实施 §5.3/5.4)
-I4 verify     schema build --check + check + convert;check 中 schema.drift 判 error(M3§9)
+I4 verify     schema build --check + check
+              + convert(client → bytesOutput)
+              + convert --target server --out <server-staging>;check 中 schema.drift 判 error(M3§9)
 I5 pr-diff    VCS-only:每本变更 workbook由 CI 求 <merge-base> → exceldb diff --json
               → json 上传为工件 + markdown 投影发 PR 评论(投影脚本属 CI/samples 接线,不登记 Project;
                 按 added/removed/renamed/modified 分组,modified 到字段路径与旧/新值)
 I6 playmode   Unity TestProject(license 可用时;降级规则见实施 §6)
-I7 工件       bytes + manifest + 全部 json 报告
+I7 工件       client bytes+manifest/report + server bytes+manifest/report + 其余 json 报告;按 target 隔离上传/包装
 ```
 
 ## 6. 版本控制接线(全部为 VCS-only 配方 + samples 脚本,独立于 G1 与 Project 配置)
@@ -207,7 +233,7 @@ I7 工件       bytes + manifest + 全部 json 报告
 
 ## 7. 场景命令样例
 
-约定:7.1 从只含 `exceldb.exe` 的 `E:\Game` 开始;初始化后使用 §3.2 的唯一 Project 配置(`schemaDir = Schema`,`Generated`,`Data/*.xlsx`,`Build/config.bytes`,`.exceldb`)。7.1-7.5 是 Windows 本地示例,显式使用 `.\exceldb.exe`;7.6/7.7 分别运行在 Git/CI runner,允许 PATH 中的 `exceldb`。样例即规格:命令形态与注释断言进验收(§10 第 15 条)。
+约定:7.1 从只含 `exceldb.exe` 的 `E:\Game` 开始;初始化后使用 §3.2 的唯一 Project 配置(`schemaDir = Schema`,`Generated`,`Data/*.xlsx`,`bytesOutput = Build/config.bytes`(client),`.exceldb`)。server 示例显式写 `Build/server/config.bytes`,但该路径不进入 Project。7.1-7.5 是 Windows 本地示例,显式使用 `.\exceldb.exe`;7.6/7.7 分别运行在 Git/CI runner,允许 PATH 中的 `exceldb`。样例即规格:命令形态与注释断言进验收(§10 第 15 条)。
 
 ### 7.1 三阶段 Project 主引导会话(G1)
 
@@ -222,8 +248,14 @@ ExcelDB Project 主引导  E:\Game
   ✓ 已应用同一内存计划;Project 可解析,proto/workbook 当前为空
 [2/3] 创建/调整 Excel 表结构并生成 C#
   事实恢复:未发现 proto → table create(不会盲重跑已有表向导)
-  workbook: Data/game.xlsx | table: Hero | id: 1001(建议) | key: id
-  fields: id:string, name:string, hp:int32
+  workbook: Data/game.xlsx | table: Hero | id: 1001(建议) | key: AutoKey
+  fields:
+    name:string     client[✓] server[✓]
+    hp:int32        client[✓] server[✓]
+    gm_note:string  client[ ] server[✓]
+  auto(DefaultTableInitializer):id:string(key), kind=ASSET
+  auto(StandardClientServerExportTargetStrategy):id targets=client+server
+  effective defaults(M1):sheet=Hero
 » .\exceldb.exe table create Hero --workbook Data/game.xlsx
   MutationPlan 19a…:Schema/Hero.proto + Generated/Hero.g.cs + Data/game.xlsx
   应用?[y/N] y
@@ -235,8 +267,9 @@ ExcelDB Project 主引导  E:\Game
   MutationPlan 42c…:2 个 pending-new 行各写一个系统 __guid;业务 cell 0 项
   应用?[y/N] y
 » .\exceldb.exe check --json .exceldb/reports/check.json
-» .\exceldb.exe convert --json .exceldb/reports/convert.json
-  ✓ Build/config.bytes + 同行 manifest
+» .\exceldb.exe convert --json .exceldb/reports/convert-client.json
+  ✓ target=client | Build/config.bytes + 同行 manifest(target=client)
+  提示:服务端发布另行执行 .\exceldb.exe convert --target server --out Build/server/config.bytes
 完成。Runtime Open、应用方写回/冲突、Play、Git diff/PR、CI 与工件分发使用各自入口。
 ```
 
@@ -254,6 +287,12 @@ ExcelDB Project 主引导  E:\Game
 .\exceldb.exe check --project client/ExcelDb.Project.json
 .\exceldb.exe schema build --project tests/fixture/ExcelDb.Project.json --schema-dir Schema --check
 .\exceldb.exe convert                                        # 无 Project 的目录执行 → 用法错误 3
+
+# C8 一次一个 target;裸调用与显式 client 均可使用 bytesOutput
+.\exceldb.exe convert --target client --json .exceldb/reports/client.json
+.\exceldb.exe convert --target server                        # 非 client 缺 --out → 用法错误 3,零产物
+.\exceldb.exe convert --target server --out Build/server/config.bytes --json .exceldb/reports/server.json
+.\exceldb.exe convert --target all --out Build/all.bytes     # 不提供 all/多目标 → 用法错误 3
 ```
 
 ### 7.3 结构演进与格式迁移(S3/S4/S10,WF2)
@@ -300,8 +339,8 @@ done
 ### 7.5 调参收尾(S16,WF5)
 
 ```text
-.\exceldb.exe convert                            # 与菜单 Convert 等价;pending-new → blocker 2
-# 切回 bytes 复验走编辑器 U13;CLI 无运行时切源面(切源是运行时事务,P§7.6/§7.8)
+.\exceldb.exe convert                            # target=client,与菜单 Convert 等价;pending-new → blocker 2
+# 切回 client bytes 复验走编辑器 U13;CLI 无运行时切源面(切源是运行时事务,P§7.6/§7.8)
 ```
 
 ### 7.6 VCS-only 协作对账(S19/S21,WF6;不进入 G1)
@@ -331,7 +370,9 @@ dotnet test tests/ExcelDb.Core.Tests   -c Release            # I3:宿主测试,�
 dotnet test tests/ExcelDb.Editor.Tests -c Release
 exceldb schema build --check                                 # I4:当前 proto/descriptor/C# 一致
 exceldb check   --json .exceldb/reports/check.json           #     drift 在 CI check 判 error(M3§9)
-exceldb convert --json .exceldb/reports/convert.json         #     bytes + manifest 上传工件(I7)
+exceldb convert --json .exceldb/reports/convert-client.json  #     client → bytesOutput;manifest/report target=client
+exceldb convert --target server --out Build/server/config.bytes --json .exceldb/reports/convert-server.json
+                                                               #     server 独立路径;两目标均绿后才上传/包装(I7)
 
 # I5 pr-diff:对 PR 每本变更 workbook(S20 评审工件)
 base=$(git merge-base origin/main HEAD)                      # 基线由 CI/Git 接线提供,不是 Project 键
@@ -339,8 +380,10 @@ git show $base:Data/game.xlsx > .exceldb/game.base.xlsx
 exceldb diff .exceldb/game.base.xlsx Data/game.xlsx --json .exceldb/reports/game.diff.json
 # *.diff.json → markdown 投影 → PR 评论(samples 脚本,非契约)
 
-# S24 线上补丁窗口(纯调数,结构变更必须随包,M3§9;schema_hash 由 bytes 打开校验兜底,P§7.4)
-exceldb convert --out Build/Patch/config.bytes --json .exceldb/reports/patch.json
+# S24 线上补丁窗口(纯调数,结构/target 变更必须随包,M3§9;schema_hash+target 由打开校验兜底,P§7.4)
+exceldb convert --out Build/Patch/client/config.bytes --json .exceldb/reports/patch-client.json
+exceldb convert --target server --out Build/Patch/server/config.bytes --json .exceldb/reports/patch-server.json
+# client/server 补丁分别分发,不得交叉改名或包装
 ```
 
 ## 8. 失败呈现面(M3§10 总表 × 首见者 × 位置)
@@ -376,6 +419,7 @@ exceldb convert --out Build/Patch/config.bytes --json .exceldb/reports/patch.jso
 | 7 | 菜单热键 | 避让 Unity 原生键位;团队自绑 |
 | 8 | 角色/权限面板 | 工作面不是权限系统(M3§1) |
 | 9 | G1 阶段自定义/插件化 | G1 是固定三阶段 Project 主引导,不是工作流注册表;其他场景走子命令、U/API/I/V 入口,不把主线扩成菜单 |
+| 10 | 声明式表初始化模板/profile 与脚本/程序集自动发现 | M1 `ITableInitializer` 已提供窄的 C# composition seam,结果必须落 proto;不再建第二声明语言或隐式代码执行路径。该 seam 只是 C3 的意图构造策略,不违反 ✗9 |
 
 ## 10. 模块验收测试
 
@@ -401,6 +445,7 @@ CLI 与配方可自动化;窗口/对话框为手测清单(实施 §3-M5 惯例):
 18. Project-only 配置:§3.2 恰为 `schemaDir/generatedDir/workbooks/bytesOutput/cacheDir`;schemaDir 缺省 `Schema`,`table create Hero` 缺省落 `Schema/Hero.proto`;`--schema-dir` 可覆盖,旧 schema glob 字段/参数及 assembly/build target/runtime/Git/script 键均拒绝。descriptor/report 从 cacheDir 推导,C9/I5 不读取 G1 进度。
 19. 单文件离线:每个支持 RID 在无 .NET Runtime/SDK、无 PATH protoc、无网络的隔离机完成 init→首表/结构调整→data prepare→check→convert;给定同一输入和同一序列化 MutationPlan,单文件与可选 dotnet tool 的报告、C#、xlsx、bytes 逐字/逐字节等价。
 20. 原子写入:分别在 C1/C3/C4/C5/C6/C10 的每个目标写入点注入失败;断言 init 不留下半 Project,其他命令不局部替换 proto/C#/xlsx/identity。C2 的 descriptor/cache+C# 替换也单独验证全成或全不成。
+21. 表初始化器:C3 仅输入 `Hero + Data/game.xlsx + AutoKey + name:string + hp:int32`,断言 `DefaultTableInitializer` 补入 `id:string(key)` 与 `kind=ASSET`,M1 effective defaults 另清晰标示,所有用户/自动项与建议身份均在计划中可见,确认前零写入。定制 Schema Tooling 发行物以普通 C# initializer 自动增加一个简单字段/选项,断言无新 Project 键或声明文件、仍过 M1 lint 与同一 MutationPlan。initializer 异常/非法 draft 零领域写入;dry-run 后移除 initializer 不影响原 plan apply,提交后更换 initializer 不改变已有表的 build/generate/check/convert 结果。标准 CLI 另断言不扫描/编译项目 `.cs` 或外部程序集。
 
 ## 11. 与仓库现状衔接
 
@@ -513,3 +558,13 @@ CLI 与配方可自动化;窗口/对话框为手测清单(实施 §3-M5 惯例):
 **可执行程序不是已有 schema 工程外面的薄壳,而是离线 Project 自举器:每个平台一个 self-contained 单文件,内嵌 schema 编译/codegen/xlsx/convert;G1 固定为“幂等 init → 创建/可选重复调整表结构并生成 C# → Excel 填数后显式 data prepare/check/convert”三阶段。所有领域写入确认的是带 hash/fingerprints 的同一不可变 MutationPlan,恢复只看当前工件事实;proto 仍是结构事实源,C# 是类型投影,data prepare 只固化 pending 行身份。**
 
 落点:§2 S1/S3/S6/S10、§3 全节、§5、§7.1-7.4/7.7、§10 第 16-20 条;D3 的“不得从工具侧长新命令”仅保留“先回修机制再投影”的原则,缺失的一等操作由 owner 修订后登记为 C1/C3/C4/C10。
+
+---
+
+### D11(2026-07-12)首次建表只填简单字段,自动补齐用 C# 表初始化器
+
+> 所以应该填结构支持的简单字段， 甚至允许经过选项自动设置。 关于这一项， 希望在代码实现时抽象为表初始化器接口， 允许自定义（简单cs代码扩展即可， 不再通过复杂的自定义声明）
+
+**首次建表界面只承载简单结构意图;约定字段与 option 由可替换的 `ITableInitializer` 在代码中确定性补齐,随后仍走同一 candidate-proto/MutationPlan 管线。该扩展点是 C3 的 C# composition seam,不是模板 DSL、Project 配置、G1 插件或第二 schema 事实源。**
+
+落点:§3.1 首次输入,§3.2 配置非目标,§3.3 C3 扩展点,§3.4 plan 冻结边界,§3.6 定制发行,§9 ✗10,§10 第 21 条;M1 D14 拥有 initializer/draft 机制。
