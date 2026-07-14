@@ -114,6 +114,9 @@ public sealed class SchemaCodeGeneratorTests
             startInfo.ArgumentList.Add("-c");
             startInfo.ArgumentList.Add("Release");
             startInfo.ArgumentList.Add("--nologo");
+            startInfo.ArgumentList.Add("--disable-build-servers");
+            startInfo.Environment["MSBUILDDISABLENODEREUSE"] = "1";
+            startInfo.Environment["DOTNET_CLI_USE_MSBUILD_SERVER"] = "0";
             using var process = Process.Start(startInfo)!;
             var outputTask = process.StandardOutput.ReadToEndAsync();
             var errorTask = process.StandardError.ReadToEndAsync();
