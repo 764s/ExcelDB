@@ -87,14 +87,14 @@ Host Adapters(Unity 等) + Integration Tools
 
 | ID | Owner 文档 | 领域所有权 | 设计状态 | 实现状态 |
 | --- | --- | --- | --- | --- |
-| M1 | [`01-schema.md`](../modules/01-schema.md) | proto schema、descriptor、codegen 结构契约 | Dependency-Complete | Implementation-in-progress |
-| M2 | [`02-assetdatabase.md`](../modules/02-assetdatabase.md) | authoring facade 使用契约 | Dependency-Complete | Implementation-in-progress |
-| M3 | [`03-workflow.md`](../modules/03-workflow.md) | 角色、工件与端到端编排 | Dependency-Complete | Implementation-in-progress |
-| M4 | [`04-integration-tools.md`](../modules/04-integration-tools.md) | CLI/Unity/CI/VCS 工具投影 | Dependency-Complete | Implementation-in-progress |
-| M5 | [`05-workbook-identity.md`](../modules/05-workbook-identity.md) | workbook、metadata、行身份、路径/token | Dependency-Complete | Implementation-in-progress |
-| M6 | [`06-import-edit.md`](../modules/06-import-edit.md) | 导入、快照、合并、dirty、写回、watcher | Dependency-Complete | Implementation-in-progress |
-| M7 | [`07-runtime.md`](../modules/07-runtime.md) | source、resident、运行时查询、热载、切源、ChangeSet | Dependency-Complete | Implementation-in-progress |
-| M8 | [`08-compatibility.md`](../modules/08-compatibility.md) | schema/workbook/bytes 兼容与迁移 | Dependency-Complete | Implementation-in-progress |
+| M1 | [`01-schema.md`](../modules/01-schema.md) | proto schema、descriptor、codegen 结构契约 | Dependency-Complete | Verified |
+| M2 | [`02-assetdatabase.md`](../modules/02-assetdatabase.md) | authoring facade 使用契约 | Dependency-Complete | Verified |
+| M3 | [`03-workflow.md`](../modules/03-workflow.md) | 角色、工件与端到端编排 | Dependency-Complete | Verified |
+| M4 | [`04-integration-tools.md`](../modules/04-integration-tools.md) | CLI/Unity/CI/VCS 工具投影 | Dependency-Complete | Verified |
+| M5 | [`05-workbook-identity.md`](../modules/05-workbook-identity.md) | workbook、metadata、行身份、路径/token | Dependency-Complete | Verified |
+| M6 | [`06-import-edit.md`](../modules/06-import-edit.md) | 导入、快照、合并、dirty、写回、watcher | Dependency-Complete | Verified |
+| M7 | [`07-runtime.md`](../modules/07-runtime.md) | source、resident、运行时查询、热载、切源、ChangeSet | Dependency-Complete | Verified |
+| M8 | [`08-compatibility.md`](../modules/08-compatibility.md) | schema/workbook/bytes 兼容与迁移 | Dependency-Complete | Verified |
 
 依赖闭包：M1 + M5 是数据模型基础；M6 消费 M1/M5；M7 消费 M1/M5 的运行时投影；M8 约束 M1/M5/M6/M7 的跨版本演进；M2 投影 M5/M6/M7；M3 编排 M1/M2/M5-M8；M4 投影 M2/M3/M5-M8。
 

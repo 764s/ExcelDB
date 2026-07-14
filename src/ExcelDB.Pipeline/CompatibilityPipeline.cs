@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Buffers.Binary;
 using ExcelDb.Compatibility;
 using ExcelDb.Compatibility.Publishing;
 using ExcelDb.Core.Diagnostics;
@@ -261,6 +262,7 @@ public sealed class CompatibilityPipeline
         if (artifacts.Count == 0)
             return null;
         using var stream = new MemoryStream();
+        var length = new byte[sizeof(int)];
         foreach (var artifact in artifacts.OrderBy(static item => item.RelativePath, StringComparer.Ordinal))
         {
             var path = Path.Combine(project.Context.GeneratedDirectory, artifact.RelativePath.Replace('/', Path.DirectorySeparatorChar));
@@ -275,9 +277,11 @@ public sealed class CompatibilityPipeline
             }
             var bytes = File.ReadAllBytes(path);
             var pathBytes = System.Text.Encoding.UTF8.GetBytes(artifact.RelativePath);
-            stream.Write(BitConverter.GetBytes(pathBytes.Length));
+            BinaryPrimitives.WriteInt32LittleEndian(length, pathBytes.Length);
+            stream.Write(length);
             stream.Write(pathBytes);
-            stream.Write(BitConverter.GetBytes(bytes.Length));
+            BinaryPrimitives.WriteInt32LittleEndian(length, bytes.Length);
+            stream.Write(length);
             stream.Write(bytes);
         }
         return new TargetArtifactComponentEvidence(
@@ -310,7 +314,9 @@ public sealed class CompatibilityPipeline
             try
             {
                 var bytes = File.ReadAllBytes(path);
-                var workbook = XlsxWorkbookCodec.Read(bytes);
+                var inspection = XlsxWorkbookCodec.Inspect(bytes, schema.Descriptor);
+                diagnostics.AddRange(inspection.Diagnostics);
+                var workbook = inspection.Workbook;
                 var import = WorkbookImporter.Import(path, bytes, workbook, schema.Descriptor, cellFormats: _cellFormats);
                 foreach (var tableId in import.Rows.Select(static row => row.TableId).Distinct())
                     nonEmpty.Add(tableId);

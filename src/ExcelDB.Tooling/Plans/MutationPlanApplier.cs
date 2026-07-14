@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.Json;
 using ExcelDb.Core.Diagnostics;
 using ExcelDb.Core.IO;
 
@@ -6,6 +7,13 @@ namespace ExcelDb.Tooling.Plans;
 
 public sealed class MutationPlanApplier
 {
+    private const string JournalFileName = "journal.json";
+    private static readonly JsonSerializerOptions JournalJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true,
+    };
+
     public OperationReport Apply(MutationPlan plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
@@ -15,6 +23,11 @@ public sealed class MutationPlanApplier
             return new OperationReport(plan.Operation, plan.ToolVersion, false, plan.Diagnostics, [], plan.PlanHash);
 
         var root = Path.GetFullPath(plan.ProjectRoot);
+        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root))
+            ?? throw new InvalidOperationException("The project root has no parent directory.");
+        var recovery = RecoverPending(root);
+        if (!recovery.Succeeded)
+            return recovery with { Operation = plan.Operation, PlanHash = plan.PlanHash };
         foreach (var observation in plan.Observations)
         {
             if (!PathFacts.Matches(root, observation))
@@ -32,20 +45,22 @@ public sealed class MutationPlanApplier
         if (plan.Mutations.IsEmpty)
             return new OperationReport(plan.Operation, plan.ToolVersion, false, plan.Diagnostics, [], plan.PlanHash);
 
-        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root))
-            ?? throw new InvalidOperationException("The project root has no parent directory.");
         Directory.CreateDirectory(parent);
         var transactionRoot = Path.Combine(parent, $".exceldb-txn-{Guid.NewGuid():N}");
         var staged = Path.Combine(transactionRoot, "staged");
         var backup = Path.Combine(transactionRoot, "backup");
         Directory.CreateDirectory(staged);
         Directory.CreateDirectory(backup);
+        var journalPath = Path.Combine(transactionRoot, JournalFileName);
 
         var createdDirectories = new List<string>();
         var committed = new List<(string Destination, string? Backup)>();
+        var cleanup = false;
         try
         {
             StageWrites(plan, staged);
+            var journal = BuildJournal(plan, root, transactionRoot);
+            WriteJournal(journalPath, journal);
             foreach (var mutation in plan.Mutations.Where(static item => item.Kind == FileMutationKind.CreateDirectory))
             {
                 var destination = PathFacts.ResolveContained(root, mutation.RelativePath);
@@ -56,6 +71,8 @@ public sealed class MutationPlanApplier
                 }
             }
 
+            journal.Phase = "applying";
+            WriteJournal(journalPath, journal);
             foreach (var pair in plan.Mutations.Select((mutation, index) => (mutation, index)))
             {
                 var mutation = pair.mutation;
@@ -64,10 +81,13 @@ public sealed class MutationPlanApplier
 
                 var destination = PathFacts.ResolveContained(root, mutation.RelativePath);
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                var journalItem = journal.Items.Single(item => item.Index == pair.index);
+                if (File.Exists(destination) != journalItem.HadOriginal)
+                    throw new IOException($"Destination '{mutation.RelativePath}' changed while the durable transaction was being prepared.");
                 string? backupPath = null;
                 if (File.Exists(destination))
                 {
-                    backupPath = Path.Combine(backup, pair.index.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    backupPath = journalItem.BackupPath;
                     File.Move(destination, backupPath);
                 }
 
@@ -78,23 +98,93 @@ public sealed class MutationPlanApplier
                 }
 
                 committed.Add((destination, backupPath));
+                journalItem.Applied = true;
+                WriteJournal(journalPath, journal);
             }
 
+            journal.Phase = "committed";
+            WriteJournal(journalPath, journal);
             var artifacts = plan.Mutations
                 .Where(static item => item.Kind == FileMutationKind.WriteFile)
                 .Select(item => new ArtifactRecord("file", PathFacts.ResolveContained(root, item.RelativePath), item.ContentSha256))
                 .ToImmutableArray();
+            cleanup = true;
             return new OperationReport(plan.Operation, plan.ToolVersion, true, plan.Diagnostics, artifacts, plan.PlanHash);
         }
         catch
         {
             RollBack(committed, createdDirectories);
+            cleanup = true;
             throw;
         }
         finally
         {
-            if (Directory.Exists(transactionRoot))
+            if (cleanup && Directory.Exists(transactionRoot))
                 Directory.Delete(transactionRoot, recursive: true);
+        }
+    }
+
+    /// <summary>Rolls every incomplete durable plan transaction for this project back to its old file set.</summary>
+    public static OperationReport RecoverPending(string projectRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectRoot);
+        var root = Path.GetFullPath(projectRoot);
+        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root));
+        if (parent is null || !Directory.Exists(parent))
+            return OperationReport.Success("plan-recover", "durable-v1", applied: false);
+        var recovered = false;
+        try
+        {
+            foreach (var directory in Directory.EnumerateDirectories(parent, ".exceldb-txn-*", SearchOption.TopDirectoryOnly))
+            {
+                var journalPath = Path.Combine(directory, JournalFileName);
+                if (!File.Exists(journalPath))
+                    continue;
+                var journal = ReadJournal(journalPath);
+                if (!string.Equals(Path.GetFullPath(journal.ProjectRoot), root, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!string.Equals(journal.Phase, "committed", StringComparison.Ordinal))
+                {
+                    foreach (var item in journal.Items.OrderByDescending(static item => item.Index))
+                    {
+                        if (item.HadOriginal && File.Exists(item.BackupPath))
+                        {
+                            if (File.Exists(item.Destination))
+                                File.Delete(item.Destination);
+                            Directory.CreateDirectory(Path.GetDirectoryName(item.Destination)!);
+                            File.Move(item.BackupPath, item.Destination);
+                        }
+                        else if (!item.HadOriginal && File.Exists(item.Destination))
+                        {
+                            File.Delete(item.Destination);
+                        }
+                    }
+                    foreach (var created in journal.CreatedDirectories.OrderByDescending(static path => path.Length))
+                    {
+                        if (Directory.Exists(created) && !Directory.EnumerateFileSystemEntries(created).Any())
+                            Directory.Delete(created);
+                    }
+                    recovered = true;
+                }
+                Directory.Delete(directory, recursive: true);
+            }
+            return new OperationReport(
+                "plan-recover",
+                "durable-v1",
+                recovered,
+                recovered
+                    ? [new Diagnostic("plan.recovered", DiagnosticSeverity.Info, root, "Recovered an incomplete cross-artifact mutation plan.")]
+                    : [],
+                []);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return new OperationReport(
+                "plan-recover",
+                "durable-v1",
+                false,
+                [new Diagnostic("plan.recovery-failed", DiagnosticSeverity.Blocker, root, exception.Message)],
+                []);
         }
     }
 
@@ -113,6 +203,49 @@ public sealed class MutationPlanApplier
             AtomicFile.WriteAllBytes(Path.Combine(staged, pair.index.ToString(System.Globalization.CultureInfo.InvariantCulture)), content);
         }
     }
+
+    private static PlanJournal BuildJournal(
+        MutationPlan plan,
+        string root,
+        string transactionRoot)
+    {
+        var items = plan.Mutations
+            .Select((mutation, index) => (mutation, index))
+            .Where(static pair => pair.mutation.Kind != FileMutationKind.CreateDirectory)
+            .Select(pair =>
+            {
+                var destination = PathFacts.ResolveContained(root, pair.mutation.RelativePath);
+                return new PlanJournalItem
+                {
+                    Index = pair.index,
+                    Destination = destination,
+                    StagePath = Path.Combine(transactionRoot, "staged", pair.index.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                    BackupPath = Path.Combine(transactionRoot, "backup", pair.index.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                    HadOriginal = File.Exists(destination),
+                };
+            })
+            .ToList();
+        var createdDirectories = plan.Mutations
+            .Where(static mutation => mutation.Kind == FileMutationKind.CreateDirectory)
+            .Select(mutation => PathFacts.ResolveContained(root, mutation.RelativePath))
+            .Where(static path => !Directory.Exists(path))
+            .ToList();
+        return new PlanJournal
+        {
+            ProjectRoot = root,
+            PlanHash = plan.PlanHash,
+            Phase = "prepared",
+            Items = items,
+            CreatedDirectories = createdDirectories,
+        };
+    }
+
+    private static void WriteJournal(string path, PlanJournal journal) =>
+        AtomicFile.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(journal, JournalJson));
+
+    private static PlanJournal ReadJournal(string path) =>
+        JsonSerializer.Deserialize<PlanJournal>(File.ReadAllBytes(path), JournalJson)
+        ?? throw new JsonException("Mutation plan journal is empty.");
 
     private static void RollBack(
         List<(string Destination, string? Backup)> committed,
@@ -135,5 +268,24 @@ public sealed class MutationPlanApplier
                 Directory.Delete(createdDirectories[index]);
             }
         }
+    }
+
+    private sealed class PlanJournal
+    {
+        public string ProjectRoot { get; set; } = string.Empty;
+        public string PlanHash { get; set; } = string.Empty;
+        public string Phase { get; set; } = string.Empty;
+        public List<PlanJournalItem> Items { get; set; } = [];
+        public List<string> CreatedDirectories { get; set; } = [];
+    }
+
+    private sealed class PlanJournalItem
+    {
+        public int Index { get; set; }
+        public string Destination { get; set; } = string.Empty;
+        public string StagePath { get; set; } = string.Empty;
+        public string BackupPath { get; set; } = string.Empty;
+        public bool HadOriginal { get; set; }
+        public bool Applied { get; set; }
     }
 }

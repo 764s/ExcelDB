@@ -276,7 +276,7 @@ public sealed class SchemaCodeGenerator
         {
             builder.AppendLine("internal static class GeneratedCanonicalCellCodec");
             builder.AppendLine("{");
-            builder.AppendLine("    private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };");
+            builder.AppendLine("    private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };");
             builder.AppendLine("    public static T Parse<T>(string text)");
             builder.AppendLine("    {");
             builder.AppendLine("        var declared = typeof(T);");
@@ -472,7 +472,7 @@ public sealed class SchemaCodeGenerator
 
         builder.AppendLine("internal static class RuntimeGeneratedValueCodec");
         builder.AppendLine("{");
-        builder.AppendLine("    private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };");
+        builder.AppendLine("    private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };");
         builder.AppendLine("    public static T Parse<T>(ReadOnlySpan<byte> data)");
         builder.AppendLine("    {");
         builder.AppendLine("        var declared = typeof(T);");
@@ -526,22 +526,19 @@ public sealed class SchemaCodeGenerator
                 .Where(field => field.ExportTargets.Contains(target, StringComparer.Ordinal))
                 .OrderBy(static field => field.Id)
                 .ToArray();
+            var runtimeFields = Flatten(table.Fields)
+                .Where(field => field.ExportTargets.Contains(target, StringComparer.Ordinal))
+                .OrderBy(static field => string.Join(".", field.FieldIdPath), StringComparer.Ordinal)
+                .ToArray();
             var members = BuildMemberNames(table.Fields);
             builder.Append("    private static void Apply_").Append(table.Id).Append('(')
                 .Append(typeName).AppendLine(" instance, RuntimeAssetRecord record)");
             builder.AppendLine("    {");
+            builder.Append("        Reset_").Append(table.Id).AppendLine("(instance);");
             builder.AppendLine("        foreach (var field in record.Fields)");
             builder.AppendLine("        {");
-            builder.AppendLine("            switch (field.FieldNumber)");
-            builder.AppendLine("            {");
-            foreach (var field in fields)
-            {
-                builder.Append("                case ").Append(field.Id).Append(": instance.")
-                    .Append(members[field.Id]).Append(" = RuntimeGeneratedValueCodec.Parse<")
-                    .Append(GetCSharpType(field, typeNames)).AppendLine(">(field.Data.Span); break;");
-            }
-
-            builder.AppendLine("            }");
+            foreach (var field in runtimeFields)
+                AppendRuntimeFieldAssignment(builder, table, field, typeNames);
             builder.AppendLine("        }");
             builder.AppendLine("    }");
 
@@ -643,6 +640,67 @@ public sealed class SchemaCodeGenerator
         builder.AppendLine("}");
         _ = typeNames;
         return NormalizeNewLines(builder.ToString());
+    }
+
+    private static void AppendRuntimeFieldAssignment(
+        StringBuilder builder,
+        CanonicalTableDescriptor table,
+        CanonicalFieldDescriptor field,
+        IReadOnlyDictionary<string, string> typeNames)
+    {
+        var chain = ResolveFieldChain(table, field);
+        var path = field.FieldIdPath.IsDefaultOrEmpty ? [field.Id] : field.FieldIdPath;
+        builder.Append("            if (field.FieldIdPath.Length == ")
+            .Append(path.Length.ToString(CultureInfo.InvariantCulture));
+        for (var index = 0; index < path.Length; index++)
+        {
+            builder.Append(" && field.FieldIdPath[")
+                .Append(index.ToString(CultureInfo.InvariantCulture))
+                .Append("] == ")
+                .Append(path[index].ToString(CultureInfo.InvariantCulture));
+        }
+        builder.AppendLine(")");
+        builder.AppendLine("            {");
+
+        var access = "instance";
+        var siblings = table.Fields;
+        for (var index = 0; index < chain.Length; index++)
+        {
+            var descriptor = chain[index];
+            var member = BuildMemberNames(siblings)[descriptor.Id];
+            access += "." + member;
+            if (index < chain.Length - 1)
+            {
+                builder.Append("                if (").Append(access).Append(" is null) ")
+                    .Append(access).Append(" = new ")
+                    .Append(ResolveType(descriptor.TypeName, typeNames)).AppendLine("();");
+            }
+            siblings = descriptor.Children;
+        }
+
+        builder.Append("                ").Append(access)
+            .Append(" = RuntimeGeneratedValueCodec.Parse<")
+            .Append(GetCSharpType(field, typeNames)).AppendLine(">(field.Data.Span);");
+        builder.AppendLine("                continue;");
+        builder.AppendLine("            }");
+    }
+
+    private static ImmutableArray<CanonicalFieldDescriptor> ResolveFieldChain(
+        CanonicalTableDescriptor table,
+        CanonicalFieldDescriptor leaf)
+    {
+        var path = leaf.FieldIdPath.IsDefaultOrEmpty ? [leaf.Id] : leaf.FieldIdPath;
+        var result = ImmutableArray.CreateBuilder<CanonicalFieldDescriptor>(path.Length);
+        var siblings = table.Fields;
+        foreach (var fieldId in path)
+        {
+            var descriptor = siblings.FirstOrDefault(candidate => candidate.Id == fieldId)
+                ?? throw new InvalidOperationException(
+                    $"Field path '{string.Join('.', path)}' is not rooted in table '{table.FullName}'.");
+            result.Add(descriptor);
+            siblings = descriptor.Children;
+        }
+        return result.ToImmutable();
     }
 
     private static Dictionary<string, ShapeDefinition> CollectDefinitions(

@@ -82,7 +82,8 @@ public sealed class WorkbookPipeline
                     .Where(static table => table.Kind == CanonicalTableKind.Asset)
                     .OrderBy(static table => table.Id)
                     .Select(WorkbookLayout.CreateTable)
-                    .ToImmutableArray());
+                    .ToImmutableArray(),
+                ChildTables: WorkbookLayout.CreateChildTables(schema.Descriptor));
             SchemaPipeline.WriteIfChanged(builder, workbooks[0], XlsxWorkbookCodec.Write(definition));
         }
         else
@@ -93,7 +94,14 @@ public sealed class WorkbookPipeline
                 try
                 {
                     var sourceBytes = File.ReadAllBytes(workbook);
-                    var physical = XlsxWorkbookCodec.Read(sourceBytes);
+                    var inspection = XlsxWorkbookCodec.Inspect(sourceBytes, schema.Descriptor);
+                    var physical = inspection.Workbook;
+                    if (inspection.HasDrift)
+                    {
+                        builder.AddRisk(
+                            $"projection-repair={SchemaPipeline.Relative(project, workbook)}:" +
+                            string.Join(',', inspection.RepairPlan!.Repairs));
+                    }
                     var import = WorkbookImporter.Import(
                         workbook,
                         sourceBytes,
@@ -101,7 +109,13 @@ public sealed class WorkbookPipeline
                         schema.Descriptor,
                         cellFormats: _cellFormats,
                         validators: _validators);
-                    var source = WorkbookIdentityProjection.BindCanonicalKeys(physical, import);
+                    // During an explicit rekey the persisted key projection is the old
+                    // human-token domain that references still use.  The projected copy
+                    // recomputes the new key from canonical business cells.  Normal
+                    // generate operations continue to distrust/rebuild that projection.
+                    var source = rekey
+                        ? XlsxWorkbookCodec.Read(sourceBytes)
+                        : WorkbookIdentityProjection.BindCanonicalKeys(physical, import);
                     var projected = ProjectWorkbookDefinition(source, schema.Descriptor, purge, rekey);
                     projections.Add(new WorkbookProjectionCandidate(workbook, sourceBytes, source, projected));
                 }
@@ -165,7 +179,12 @@ public sealed class WorkbookPipeline
             try
             {
                 var bytes = File.ReadAllBytes(workbook);
-                var definition = XlsxWorkbookCodec.Read(bytes);
+                var inspection = XlsxWorkbookCodec.Inspect(bytes, schema.Descriptor);
+                foreach (var diagnostic in inspection.Diagnostics)
+                    diagnostics.Add(diagnostic);
+                if (inspection.Diagnostics.Any(static item => item.IsFailure))
+                    continue;
+                var definition = inspection.Workbook;
                 var patches = BuildCanonicalPatches(definition, schema.Descriptor);
                 if (patches.Length != 0)
                 {
@@ -202,6 +221,12 @@ public sealed class WorkbookPipeline
         }
 
         var sources = ReadSources(project, workbookPath, schema.Descriptor, diagnostics);
+        if (diagnostics.Any(static item => item.IsFailure))
+        {
+            foreach (var diagnostic in diagnostics)
+                builder.AddDiagnostic(diagnostic);
+            return builder.Build();
+        }
         // A pending row receives a fresh opaque identity.  Determinism begins at the
         // frozen MutationPlan boundary; identity must never be derived from a key,
         // path, workbook fingerprint, or schema hash.
@@ -256,6 +281,7 @@ public sealed class WorkbookPipeline
         }
 
         var importedRows = new List<ImportedRow>();
+        var domainEntries = new List<WorkbookImportDomainEntry>();
         foreach (var source in sources)
         {
             var imported = WorkbookImporter.Import(
@@ -267,7 +293,9 @@ public sealed class WorkbookPipeline
                 validators: _validators);
             diagnostics.AddRange(imported.Diagnostics);
             importedRows.AddRange(imported.Rows);
+            domainEntries.Add(new WorkbookImportDomainEntry(source.Path, imported));
         }
+        diagnostics.AddRange(WorkbookImportDomain.Validate(domainEntries));
         ValidateReferences(schema.Descriptor, importedRows, diagnostics);
 
         return BuildCheck(project, diagnostics, schema, sources.Select(static source => source.Path), pending);
@@ -299,16 +327,23 @@ public sealed class WorkbookPipeline
         var diagnostics = new List<Diagnostic>();
         var records = new List<RuntimeAssetRecord>();
         var imports = new List<WorkbookImportResult>();
+        var importDomainEntries = new List<WorkbookImportDomainEntry>();
         foreach (var path in check.WorkbookPaths)
         {
             var bytes = File.ReadAllBytes(path);
-            var workbook = XlsxWorkbookCodec.Read(bytes);
+            var inspection = XlsxWorkbookCodec.Inspect(bytes, schema);
+            diagnostics.AddRange(inspection.Diagnostics);
+            if (inspection.Diagnostics.Any(static item => item.IsFailure))
+                continue;
+            var workbook = inspection.Workbook;
             var imported = WorkbookImporter.Import(path, bytes, workbook, schema, cellFormats: _cellFormats, validators: _validators);
             diagnostics.AddRange(imported.Diagnostics);
             imports.Add(imported);
+            importDomainEntries.Add(new WorkbookImportDomainEntry(path, imported));
         }
 
         var allRows = imports.SelectMany(static import => import.Rows).ToArray();
+        diagnostics.AddRange(WorkbookImportDomain.Validate(importDomainEntries));
         var targetSchema = schema with
         {
             Tables = schema.Tables
@@ -326,7 +361,7 @@ public sealed class WorkbookPipeline
                 var dependencies = new HashSet<AssetIdentity>();
                 foreach (var field in Flatten(table.Fields)
                              .Where(field => field.ExportTargets.Contains(target, StringComparer.Ordinal))
-                             .OrderBy(static field => field.Id))
+                             .OrderBy(static field => FieldPathKey(field), StringComparer.Ordinal))
                 {
                     if (!row.Values.TryGetValue(field.PropertyPath, out var value)
                         || value.State is not (CanonicalValueState.Value or CanonicalValueState.Defaulted))
@@ -347,12 +382,12 @@ public sealed class WorkbookPipeline
 
                         dependencies.Add(resolution.Identity);
                         fields.Add(new RuntimeFieldValue(
-                            field.Id,
+                            EffectiveFieldPath(field),
                             Encoding.UTF8.GetBytes(resolution.Identity.ToString())));
                         continue;
                     }
 
-                    fields.Add(new RuntimeFieldValue(field.Id, Encoding.UTF8.GetBytes(value.Text!)));
+                    fields.Add(new RuntimeFieldValue(EffectiveFieldPath(field), Encoding.UTF8.GetBytes(value.Text!)));
                 }
 
                 records.Add(new RuntimeAssetRecord(
@@ -415,9 +450,11 @@ public sealed class WorkbookPipeline
             WriteHashString(writer, record.Key);
             WriteHashString(writer, record.Path);
             writer.Write(record.Fields.Length);
-            foreach (var field in record.Fields.OrderBy(static item => item.FieldNumber))
+            foreach (var field in record.Fields.OrderBy(static item => string.Join('.', item.FieldIdPath), StringComparer.Ordinal))
             {
-                writer.Write(field.FieldNumber);
+                writer.Write(field.FieldIdPath.Length);
+                foreach (var fieldNumber in field.FieldIdPath)
+                    writer.Write(fieldNumber);
                 writer.Write(field.Data.Length);
                 writer.Write(field.Data.Span);
             }
@@ -487,7 +524,10 @@ public sealed class WorkbookPipeline
             try
             {
                 var bytes = File.ReadAllBytes(path);
-                var physical = XlsxWorkbookCodec.Read(bytes);
+                var inspection = XlsxWorkbookCodec.Inspect(bytes, schema);
+                foreach (var diagnostic in inspection.Diagnostics)
+                    diagnostics.Add(diagnostic);
+                var physical = inspection.Workbook;
                 var imported = WorkbookImporter.Import(path, bytes, physical, schema, cellFormats: _cellFormats, validators: _validators);
                 var identityBound = WorkbookIdentityProjection.BindCanonicalKeys(physical, imported);
                 sources.Add(new WorkbookSource(path, identityBound, ContentFingerprint.FromBytes(bytes)));
@@ -566,10 +606,48 @@ public sealed class WorkbookPipeline
             .Where(table => !present.Contains(table.Id))
             .OrderBy(static table => table.Id)
             .Select(WorkbookLayout.CreateTable));
+        var currentChildren = current.EffectiveChildTables.ToDictionary(
+            static table => $"{table.OwnerTableId}:{string.Join('.', table.OwnerFieldIdPath)}",
+            StringComparer.Ordinal);
+        var projectedChildren = new List<WorkbookChildTable>();
+        foreach (var layout in WorkbookLayout.CreateChildTables(schema))
+        {
+            var identity = $"{layout.OwnerTableId}:{string.Join('.', layout.OwnerFieldIdPath)}";
+            if (!currentChildren.TryGetValue(identity, out var old))
+            {
+                projectedChildren.Add(layout);
+                continue;
+            }
+            var oldProperties = old.Columns.ToDictionary(
+                static column => column.FieldPath,
+                static column => column.PropertyPath,
+                StringComparer.Ordinal);
+            var rows = old.Rows.Select(row =>
+            {
+                var cells = ImmutableDictionary.CreateBuilder<string, WorkbookCell>(StringComparer.Ordinal);
+                foreach (var column in layout.Columns)
+                {
+                    if (row.Cells.TryGetValue(column.PropertyPath, out var value))
+                        cells[column.PropertyPath] = value;
+                    else if (oldProperties.TryGetValue(column.FieldPath, out var previous)
+                             && row.Cells.TryGetValue(previous, out value))
+                        cells[column.PropertyPath] = value;
+                }
+                return row with { Cells = cells.ToImmutable() };
+            }).ToImmutableArray();
+            projectedChildren.Add(layout with { SheetName = layout.SheetName, Rows = rows });
+            currentChildren.Remove(identity);
+        }
+        if (!purge)
+            projectedChildren.AddRange(currentChildren.Values);
         return current with
         {
             SchemaHash = schema.SchemaHash,
             Tables = projectedTables.OrderBy(static table => table.TableId).ToImmutableArray(),
+            ChildTables = projectedChildren
+                .OrderBy(static table => table.OwnerTableId)
+                .ThenBy(static table => string.Join('.', table.OwnerFieldIdPath), StringComparer.Ordinal)
+                .ToImmutableArray(),
         };
     }
 
@@ -800,6 +878,12 @@ public sealed class WorkbookPipeline
     private static bool IsRowReference(CanonicalFieldDescriptor field) =>
         field.Shape == CanonicalFieldShape.Message
         && string.Equals(field.TypeName, "exceldb.RowRef", StringComparison.Ordinal);
+
+    private static ImmutableArray<int> EffectiveFieldPath(CanonicalFieldDescriptor field) =>
+        field.FieldIdPath.IsDefaultOrEmpty ? [field.Id] : field.FieldIdPath;
+
+    private static string FieldPathKey(CanonicalFieldDescriptor field) =>
+        string.Join('.', EffectiveFieldPath(field));
 
     private static IEnumerable<CanonicalFieldDescriptor> Flatten(IEnumerable<CanonicalFieldDescriptor> fields)
     {

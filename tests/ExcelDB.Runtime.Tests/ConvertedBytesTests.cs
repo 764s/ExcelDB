@@ -115,4 +115,29 @@ public sealed class ConvertedBytesTests : IDisposable
 
         Assert.Throws<InvalidDataException>(() => ConvertedBytesWriter.Build(snapshot, "test-tool"));
     }
+
+    [Fact]
+    public void VersionTwo_RoundTripsCompleteFieldPathsWithEqualLeafNumbers()
+    {
+        var asset = new RuntimeAssetRecord(
+            RuntimeTestData.Identity(1),
+            "one",
+            [
+                new RuntimeFieldValue([2, 7], "left"u8),
+                new RuntimeFieldValue([3, 7], "right"u8),
+            ]);
+        using var snapshot = RuntimeTestData.Snapshot([asset]);
+
+        var package = ConvertedBytesWriter.Build(snapshot, "test-tool");
+        var read = ConvertedBytesReader.Read(package.Bytes, package.ManifestJson);
+        using (read.Snapshot)
+        {
+            Assert.Equal(2, read.Snapshot.FormatVersion);
+            var fields = Assert.Single(read.Snapshot.Assets).Fields;
+            Assert.Equal(new[] { 2, 7 }, fields[0].FieldIdPath.ToArray());
+            Assert.Equal(new[] { 3, 7 }, fields[1].FieldIdPath.ToArray());
+            Assert.Equal("left", System.Text.Encoding.UTF8.GetString(fields[0].Data.Span));
+            Assert.Equal("right", System.Text.Encoding.UTF8.GetString(fields[1].Data.Span));
+        }
+    }
 }

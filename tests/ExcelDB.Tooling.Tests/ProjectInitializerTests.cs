@@ -1,5 +1,6 @@
 using ExcelDb.Tooling.Plans;
 using ExcelDb.Tooling.Project;
+using System.Text.Json;
 
 namespace ExcelDb.Tooling.Tests;
 
@@ -62,6 +63,48 @@ public sealed class ProjectInitializerTests : IDisposable
         json[Array.IndexOf(json, (byte)'i')] = (byte)'x';
 
         Assert.ThrowsAny<Exception>(() => MutationPlanCodec.Deserialize(json));
+    }
+
+    [Fact]
+    public void DurablePlanRecoveryRestoresOldSetAfterPartialProcessTermination()
+    {
+        Directory.CreateDirectory(_root);
+        var existing = Path.Combine(_root, "existing.txt");
+        var created = Path.Combine(_root, "created.txt");
+        File.WriteAllText(existing, "new-partial");
+        File.WriteAllText(created, "new-file-partial");
+        var transaction = Path.Combine(Path.GetDirectoryName(_root)!, ".exceldb-txn-" + Guid.NewGuid().ToString("N"));
+        var backupDirectory = Path.Combine(transaction, "backup");
+        var stagedDirectory = Path.Combine(transaction, "staged");
+        Directory.CreateDirectory(backupDirectory);
+        Directory.CreateDirectory(stagedDirectory);
+        var backup = Path.Combine(backupDirectory, "0");
+        File.WriteAllText(backup, "old-complete");
+        var options = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = true,
+        };
+        File.WriteAllText(Path.Combine(transaction, "journal.json"), JsonSerializer.Serialize(new
+        {
+            ProjectRoot = _root,
+            PlanHash = "test-plan",
+            Phase = "applying",
+            Items = new object[]
+            {
+                new { Index = 0, Destination = existing, StagePath = Path.Combine(stagedDirectory, "0"), BackupPath = backup, HadOriginal = true, Applied = true },
+                new { Index = 1, Destination = created, StagePath = Path.Combine(stagedDirectory, "1"), BackupPath = Path.Combine(backupDirectory, "1"), HadOriginal = false, Applied = true },
+            },
+            CreatedDirectories = Array.Empty<string>(),
+        }, options));
+
+        var report = MutationPlanApplier.RecoverPending(_root);
+
+        Assert.True(report.Succeeded);
+        Assert.True(report.Applied);
+        Assert.Equal("old-complete", File.ReadAllText(existing));
+        Assert.False(File.Exists(created));
+        Assert.False(Directory.Exists(transaction));
     }
 
     public void Dispose()

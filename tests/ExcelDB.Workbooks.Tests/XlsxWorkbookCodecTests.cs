@@ -1,6 +1,8 @@
 using System.IO.Compression;
 using System.Text;
 using System.Xml.Linq;
+using ExcelDb.Core.Identity;
+using ExcelDb.Schema.Descriptors;
 using ExcelDb.Workbooks.Model;
 using ExcelDb.Workbooks.OpenXml;
 
@@ -8,6 +10,55 @@ namespace ExcelDb.Workbooks.Tests;
 
 public sealed class XlsxWorkbookCodecTests
 {
+    [Fact]
+    public void Child_table_roundtrip_preserves_parent_ownership_and_order()
+    {
+        var parent = RowGuid.Parse("00000000000000000000000000000042");
+        var workbook = TestData.Workbook(TestData.Row(parent.ToString(), 1, "hero")) with
+        {
+            ChildTables =
+            [
+                new WorkbookChildTable(
+                    1,
+                    [3],
+                    CanonicalChildTableKind.RepeatedMessage,
+                    "Rewards",
+                    WorkbookProtocol.DefaultDataStartRow,
+                    [new WorkbookColumn("Item", "rewards.item", "string", "3.4")],
+                    [
+                        WorkbookChildRow.Create(parent, 1, null,
+                            [new KeyValuePair<string, WorkbookCell>("rewards.item", new WorkbookCell("sword"))]),
+                        WorkbookChildRow.Create(parent, 2, null,
+                            [new KeyValuePair<string, WorkbookCell>("rewards.item", new WorkbookCell("shield"))]),
+                    ])
+            ],
+        };
+
+        var bytes = XlsxWorkbookCodec.Write(workbook);
+        Assert.Equal(WorkbookProtocol.ParentGuidColumnName, XlsxWorkbookCodec.ReadCell(bytes, "Rewards", 2, 1)!.Text);
+        Assert.Equal(WorkbookProtocol.OrdinalColumnName, XlsxWorkbookCodec.ReadCell(bytes, "Rewards", 2, 2)!.Text);
+        var read = XlsxWorkbookCodec.Read(bytes);
+        var child = Assert.Single(read.EffectiveChildTables);
+        Assert.Equal(new[] { 3 }, child.OwnerFieldIdPath.ToArray());
+        Assert.Equal([1, 2], child.Rows.Select(static row => row.Ordinal!.Value).ToArray());
+        Assert.All(child.Rows, row => Assert.Equal(parent, row.ParentRowGuid));
+        Assert.Equal("shield", child.Rows[1].Cells["rewards.item"].Text);
+
+        var withUnownedCell = XlsxWorkbookCodec.PatchCells(
+            bytes,
+            [new CellPatch("Rewards", 4, 8, new WorkbookCell("designer-note"))]);
+        var projectedChild = child with
+        {
+            Rows = child.Rows.SetItem(1, child.Rows[1] with
+            {
+                Cells = child.Rows[1].Cells.SetItem("rewards.item", new WorkbookCell("armor")),
+            }),
+        };
+        var projected = XlsxWorkbookCodec.Project(withUnownedCell, read with { ChildTables = [projectedChild] });
+        Assert.Equal("armor", XlsxWorkbookCodec.ReadCell(projected, "Rewards", 5, 3)!.Text);
+        Assert.Equal("designer-note", XlsxWorkbookCodec.ReadCell(projected, "Rewards", 4, 8)!.Text);
+    }
+
     [Fact]
     public void V1_roundtrip_has_three_headers_hidden_protocol_sheets_and_trailing_system_columns()
     {

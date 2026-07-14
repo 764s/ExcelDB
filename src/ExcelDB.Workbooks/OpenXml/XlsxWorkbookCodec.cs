@@ -63,6 +63,15 @@ public static class XlsxWorkbookCodec
                 false,
                 BuildTableWorksheet(table, workbook.Tables)));
         }
+        foreach (var childTable in workbook.EffectiveChildTables
+                     .OrderBy(static table => table.OwnerTableId)
+                     .ThenBy(static table => string.Join('.', table.OwnerFieldIdPath), StringComparer.Ordinal))
+        {
+            sheets.Add(new SheetPart(
+                childTable.SheetName,
+                false,
+                BuildChildTableWorksheet(childTable)));
+        }
 
         sheets.Add(new SheetPart(
             WorkbookProtocol.MetadataSheetName,
@@ -181,6 +190,55 @@ public static class XlsxWorkbookCodec
                 Serialize(BuildTableWorksheet(projectedTable, projectedWorkbook.Tables))));
         }
 
+        var sourceChildren = sourceWorkbook.EffectiveChildTables.ToDictionary(
+            static table => ChildOwnerKey(table.OwnerTableId, table.OwnerFieldIdPath),
+            StringComparer.Ordinal);
+        var projectedChildren = projectedWorkbook.EffectiveChildTables.ToDictionary(
+            static table => ChildOwnerKey(table.OwnerTableId, table.OwnerFieldIdPath),
+            StringComparer.Ordinal);
+        foreach (var pair in sourceChildren)
+        {
+            if (projectedChildren.ContainsKey(pair.Key))
+                continue;
+            var sourceChild = pair.Value;
+            var sheetElement = FindSheetElement(sheetContainer, sourceChild.SheetName);
+            var relationshipId = RequiredRelationshipId(sheetElement, sourceChild.SheetName);
+            var partName = package.Sheets[sourceChild.SheetName];
+            sheetElement.Remove();
+            FindRelationship(relationshipContainer, relationshipId)?.Remove();
+            removedParts.Add(partName);
+            RemoveWorksheetContentType(contentTypesContainer, partName);
+        }
+        foreach (var pair in projectedChildren.OrderBy(static item => item.Key, StringComparer.Ordinal))
+        {
+            var projectedChild = pair.Value;
+            if (sourceChildren.TryGetValue(pair.Key, out var sourceChild))
+            {
+                var sheetElement = FindSheetElement(sheetContainer, sourceChild.SheetName);
+                sheetElement.SetAttributeValue("name", projectedChild.SheetName);
+                var partName = package.Sheets[sourceChild.SheetName];
+                var document = LoadXml(package.EntryBytes[partName]);
+                ProjectChildTableWorksheet(document, sourceChild, projectedChild, purgeUnownedCells);
+                replacements[partName] = Serialize(document);
+                continue;
+            }
+            var newPart = AllocateWorksheetPart(package.EntryBytes.Keys, addedEntries, removedParts);
+            var relationshipId = AllocateRelationshipId(relationshipContainer);
+            var sheetId = AllocateSheetId(sheetContainer);
+            sheetContainer.Add(new XElement(
+                Spreadsheet + "sheet",
+                new XAttribute("name", projectedChild.SheetName),
+                new XAttribute("sheetId", sheetId),
+                new XAttribute(OfficeRelationships + "id", relationshipId)));
+            relationshipContainer.Add(new XElement(
+                PackageRelationships + "Relationship",
+                new XAttribute("Id", relationshipId),
+                new XAttribute("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"),
+                new XAttribute("Target", newPart[3..])));
+            AddWorksheetContentType(contentTypesContainer, newPart);
+            addedEntries.Add(new PackageEntry(newPart, Serialize(BuildChildTableWorksheet(projectedChild))));
+        }
+
         ProjectProtocolSheet(
             package,
             sheetContainer,
@@ -266,8 +324,23 @@ public static class XlsxWorkbookCodec
 
             tables.Add(ReadTable(package, tablePart, tableMetadata, fieldPaths, keyMap));
         }
+        var childTables = new List<WorkbookChildTable>();
+        foreach (var childMetadata in ReadChildTableMetadata(metadata)
+                     .OrderBy(static table => table.OwnerTableId)
+                     .ThenBy(static table => string.Join('.', table.OwnerFieldIdPath), StringComparer.Ordinal))
+        {
+            if (!package.Sheets.TryGetValue(childMetadata.SheetName, out var childPart))
+                throw new InvalidDataException($"Missing managed child worksheet '{childMetadata.SheetName}'.");
+            childTables.Add(ReadChildTable(package, childPart, childMetadata, ReadChildFieldPaths(metadata)));
+        }
 
-        return new WorkbookDefinition(workbookGuid, schemaHash, savedUtc, tables.ToImmutableArray(), migrationMarkers);
+        return new WorkbookDefinition(
+            workbookGuid,
+            schemaHash,
+            savedUtc,
+            tables.ToImmutableArray(),
+            migrationMarkers,
+            childTables.ToImmutableArray());
     }
 
     /// <summary>
@@ -288,8 +361,11 @@ public static class XlsxWorkbookCodec
         var fingerprint = ContentFingerprint.FromBytes(packageBytes);
         WorksheetGrid? metadata = null;
         IReadOnlyList<TableMetadata> metadataTables = [];
+        IReadOnlyList<ChildTableMetadata> metadataChildTables = [];
         IReadOnlyDictionary<(int TableId, int Column), string> metadataFieldPaths =
             new Dictionary<(int TableId, int Column), string>();
+        IReadOnlyDictionary<(string OwnerKey, int Column), string> metadataChildFieldPaths =
+            new Dictionary<(string OwnerKey, int Column), string>();
         var workbookGuid = Guid.NewGuid();
         var savedUtc = DateTimeOffset.UnixEpoch;
         ImmutableArray<string> migrationMarkers = [];
@@ -315,6 +391,8 @@ public static class XlsxWorkbookCodec
 
                 metadataTables = ReadTableMetadata(metadata);
                 metadataFieldPaths = ReadFieldPaths(metadata);
+                metadataChildTables = ReadChildTableMetadata(metadata);
+                metadataChildFieldPaths = ReadChildFieldPaths(metadata);
                 migrationMarkers = ReadMigrationMarkers(metadata);
             }
             catch (InvalidDataException exception)
@@ -327,6 +405,8 @@ public static class XlsxWorkbookCodec
                 repairs.Add("metadata.invalid");
                 metadataTables = [];
                 metadataFieldPaths = new Dictionary<(int TableId, int Column), string>();
+                metadataChildTables = [];
+                metadataChildFieldPaths = new Dictionary<(string OwnerKey, int Column), string>();
             }
         }
         else
@@ -433,12 +513,52 @@ public static class XlsxWorkbookCodec
                 $"Historical retired table {retired.Id}/{retired.FullName} is preserved outside the live import domain."));
         }
 
+        var childTables = new List<WorkbookChildTable>();
+        foreach (var layout in WorkbookLayout.CreateChildTables(schema))
+        {
+            var ownerKey = ChildOwnerKey(layout.OwnerTableId, layout.OwnerFieldIdPath);
+            var registered = metadataChildTables.FirstOrDefault(candidate =>
+                candidate.OwnerTableId == layout.OwnerTableId
+                && candidate.OwnerFieldIdPath.SequenceEqual(layout.OwnerFieldIdPath));
+            var sheetName = new[] { registered?.SheetName, layout.SheetName }
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .FirstOrDefault(value => package.Sheets.ContainsKey(value!));
+            if (sheetName is null)
+            {
+                diagnostics.Add(new Diagnostic(
+                    "EXWB1205",
+                    DiagnosticSeverity.Error,
+                    layout.SheetName,
+                    $"Managed child worksheet for {ownerKey} is missing."));
+                repairs.Add($"child.{ownerKey}.missing");
+                childTables.Add(layout);
+                continue;
+            }
+            consumedSheets.Add(sheetName);
+            var effectiveMetadata = registered ?? new ChildTableMetadata(
+                layout.OwnerTableId,
+                layout.OwnerFieldIdPath,
+                layout.Kind,
+                sheetName,
+                layout.DataStartRow);
+            var inferred = InferChildFieldPaths(
+                package,
+                sheetName,
+                layout,
+                metadataChildFieldPaths);
+            childTables.Add(ReadChildTable(package, package.Sheets[sheetName], effectiveMetadata, inferred));
+        }
+
         var workbook = new WorkbookDefinition(
             workbookGuid,
             schema.SchemaHash,
             savedUtc,
             tables.OrderBy(static table => table.TableId).ToImmutableArray(),
-            migrationMarkers);
+            migrationMarkers,
+            childTables
+                .OrderBy(static table => table.OwnerTableId)
+                .ThenBy(static table => string.Join('.', table.OwnerFieldIdPath), StringComparer.Ordinal)
+                .ToImmutableArray());
         var import = WorkbookImporter.Import("<inspection>", packageBytes, workbook, schema);
         workbook = WorkbookIdentityProjection.BindCanonicalKeys(workbook, import, schema);
 
@@ -459,7 +579,7 @@ public static class XlsxWorkbookCodec
             repairs.Add("keys.stale");
             diagnostics.Add(new Diagnostic(
                 "EXWB1203",
-                DiagnosticSeverity.Error,
+                DiagnosticSeverity.Warning,
                 WorkbookProtocol.KeySheetName,
                 "The reference-key projection is missing or stale and can be rebuilt from schema-owned key cells."));
         }
@@ -636,6 +756,51 @@ public static class XlsxWorkbookCodec
         return document;
     }
 
+    private static XDocument BuildChildTableWorksheet(WorkbookChildTable table)
+    {
+        var systemNames = table.Kind == CanonicalChildTableKind.RepeatedMessage
+            ? new[] { WorkbookProtocol.ParentGuidColumnName, WorkbookProtocol.OrdinalColumnName }
+            : new[] { WorkbookProtocol.ParentGuidColumnName, WorkbookProtocol.MapKeyColumnName };
+        var systemTypes = table.Kind == CanonicalChildTableKind.RepeatedMessage
+            ? new[] { "row_guid", "int32" }
+            : new[] { "row_guid", "string" };
+        var rows = new List<IReadOnlyList<WorkbookCell?>>
+        {
+            systemNames.Select(static name => (WorkbookCell?)new WorkbookCell(name))
+                .Concat(table.Columns.Select(static column => (WorkbookCell?)new WorkbookCell(column.DisplayName)))
+                .ToArray(),
+            systemNames.Select(static name => (WorkbookCell?)new WorkbookCell(name))
+                .Concat(table.Columns.Select(static column => (WorkbookCell?)new WorkbookCell(column.PropertyPath)))
+                .ToArray(),
+            systemTypes.Select(static name => (WorkbookCell?)new WorkbookCell(name))
+                .Concat(table.Columns.Select(static column => (WorkbookCell?)new WorkbookCell(column.TypeName)))
+                .ToArray(),
+        };
+        while (rows.Count + 1 < table.DataStartRow)
+            rows.Add([]);
+        foreach (var row in table.Rows)
+        {
+            var targetRow = row.SourceRowNumber ?? (rows.Count + 1);
+            if (targetRow < table.DataStartRow || targetRow < rows.Count + 1)
+                throw new InvalidDataException($"Rows in child worksheet '{table.SheetName}' are not in source order.");
+            while (rows.Count + 1 < targetRow)
+                rows.Add([]);
+            var cells = new List<WorkbookCell?>(ChildSystemColumnCount(table.Kind) + table.Columns.Length)
+            {
+                row.ParentRowGuid is { } parent
+                    ? new WorkbookCell(parent.ToString())
+                    : row.RawParentRowGuid is null ? null : new WorkbookCell(row.RawParentRowGuid),
+                table.Kind == CanonicalChildTableKind.RepeatedMessage
+                    ? row.Ordinal is { } ordinal ? new WorkbookCell(ordinal.ToString(CultureInfo.InvariantCulture)) : null
+                    : string.IsNullOrEmpty(row.MapKey) ? null : new WorkbookCell(row.MapKey),
+            };
+            foreach (var column in table.Columns)
+                cells.Add(row.Cells.GetValueOrDefault(column.PropertyPath));
+            rows.Add(cells);
+        }
+        return BuildWorksheet(rows);
+    }
+
     private static XDocument BuildMetadataWorksheet(WorkbookDefinition workbook)
     {
         var rows = new List<IReadOnlyList<WorkbookCell?>>
@@ -675,6 +840,32 @@ public static class XlsxWorkbookCodec
                     column.PropertyPath,
                     table.SheetName,
                     column: (columnIndex + 1).ToString(CultureInfo.InvariantCulture),
+                    span: "1",
+                    value: column.TypeName));
+            }
+        }
+
+        foreach (var childTable in workbook.EffectiveChildTables
+                     .OrderBy(static table => table.OwnerTableId)
+                     .ThenBy(static table => string.Join('.', table.OwnerFieldIdPath), StringComparer.Ordinal))
+        {
+            var ownerKey = ChildOwnerKey(childTable.OwnerTableId, childTable.OwnerFieldIdPath);
+            rows.Add(MetadataRow(
+                "child",
+                ownerKey,
+                childTable.Kind.ToString(),
+                childTable.SheetName,
+                childTable.DataStartRow.ToString(CultureInfo.InvariantCulture)));
+            var systemColumns = ChildSystemColumnCount(childTable.Kind);
+            for (var index = 0; index < childTable.Columns.Length; index++)
+            {
+                var column = childTable.Columns[index];
+                rows.Add(MetadataRow(
+                    "child_field",
+                    $"{ownerKey}:{column.FieldPath}",
+                    column.PropertyPath,
+                    childTable.SheetName,
+                    column: (systemColumns + index + 1).ToString(CultureInfo.InvariantCulture),
                     span: "1",
                     value: column.TypeName));
             }
@@ -1209,9 +1400,21 @@ public static class XlsxWorkbookCodec
             if (!projectedNames.Add(table.SheetName))
                 throw new InvalidDataException($"Duplicate projected worksheet name '{table.SheetName}'.");
         }
+        foreach (var child in projectedWorkbook.EffectiveChildTables)
+        {
+            if (string.IsNullOrWhiteSpace(child.SheetName))
+                throw new InvalidDataException($"Child table {ChildOwnerKey(child.OwnerTableId, child.OwnerFieldIdPath)} has no worksheet name.");
+            if (string.Equals(child.SheetName, WorkbookProtocol.MetadataSheetName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(child.SheetName, WorkbookProtocol.KeySheetName, StringComparison.OrdinalIgnoreCase)
+                || !projectedNames.Add(child.SheetName))
+            {
+                throw new InvalidDataException($"Duplicate or reserved projected worksheet name '{child.SheetName}'.");
+            }
+        }
 
         var managedSourceNames = sourceWorkbook.Tables
             .Select(static table => table.SheetName)
+            .Concat(sourceWorkbook.EffectiveChildTables.Select(static table => table.SheetName))
             .Append(WorkbookProtocol.MetadataSheetName)
             .Append(WorkbookProtocol.KeySheetName)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -1230,6 +1433,11 @@ public static class XlsxWorkbookCodec
             .FirstOrDefault(static group => group.Count() > 1);
         if (duplicateId is not null)
             throw new InvalidDataException($"Duplicate projected table id '{duplicateId.Key}'.");
+        var duplicateChild = projectedWorkbook.EffectiveChildTables
+            .GroupBy(static child => ChildOwnerKey(child.OwnerTableId, child.OwnerFieldIdPath), StringComparer.Ordinal)
+            .FirstOrDefault(static group => group.Count() > 1);
+        if (duplicateChild is not null)
+            throw new InvalidDataException($"Duplicate projected child table '{duplicateChild.Key}'.");
     }
 
     private static void ProjectTableWorksheet(
@@ -1272,6 +1480,42 @@ public static class XlsxWorkbookCodec
                 patch.Value)));
         UpdateManagedHiddenColumns(document, sourceTable.Columns.Length, projectedTable.Columns.Length);
         ProjectGeneratedDataValidations(document, desiredWorksheet);
+    }
+
+    private static void ProjectChildTableWorksheet(
+        XDocument document,
+        WorkbookChildTable sourceTable,
+        WorkbookChildTable projectedTable,
+        bool purgeUnownedCells)
+    {
+        var desired = ReadWorksheetCells(BuildChildTableWorksheet(projectedTable));
+        var existing = ReadWorksheetCoordinates(document);
+        var patches = new Dictionary<(int Row, int Column), WorkbookCell?>();
+        var sourceWidth = ChildSystemColumnCount(sourceTable.Kind) + sourceTable.Columns.Length;
+        var projectedWidth = ChildSystemColumnCount(projectedTable.Kind) + projectedTable.Columns.Length;
+        foreach (var coordinate in existing)
+        {
+            var wasOwned = coordinate.Column <= sourceWidth
+                           && (coordinate.Row <= WorkbookProtocol.HeaderRows || coordinate.Row >= sourceTable.DataStartRow);
+            var becomesOwned = coordinate.Column <= projectedWidth
+                               && (coordinate.Row <= WorkbookProtocol.HeaderRows || coordinate.Row >= projectedTable.DataStartRow);
+            if (!wasOwned && becomesOwned && !purgeUnownedCells)
+            {
+                throw new InvalidDataException(
+                    $"Child worksheet '{projectedTable.SheetName}' cannot manage "
+                    + $"{ColumnName(coordinate.Column)}{coordinate.Row} because the source cell is not owned by ExcelDB. "
+                    + "Use explicit purge mode to remove or replace the colliding cell.");
+            }
+            if (wasOwned || becomesOwned)
+                patches[coordinate] = desired.GetValueOrDefault(coordinate);
+        }
+        foreach (var desiredCell in desired)
+            patches[desiredCell.Key] = desiredCell.Value;
+        PatchWorksheet(document, patches.Select(static patch => new CellPatch(
+            string.Empty,
+            patch.Key.Row,
+            patch.Key.Column,
+            patch.Value)));
     }
 
     private static void ProjectGeneratedDataValidations(XDocument document, XDocument desiredDocument)
@@ -1652,6 +1896,29 @@ public static class XlsxWorkbookCodec
         return tables;
     }
 
+    private static IReadOnlyList<ChildTableMetadata> ReadChildTableMetadata(WorksheetGrid grid)
+    {
+        var tables = new List<ChildTableMetadata>();
+        for (var row = 2; row <= grid.MaxRow; row++)
+        {
+            if (!string.Equals(grid.Text(row, 1), "child", StringComparison.Ordinal))
+                continue;
+            if (!TryParseChildOwnerKey(grid.Text(row, 2), out var ownerTableId, out var ownerPath))
+                throw new InvalidDataException($"Invalid child owner at {WorkbookProtocol.MetadataSheetName}!A{row}.");
+            if (!Enum.TryParse<CanonicalChildTableKind>(grid.Text(row, 3), false, out var kind))
+                throw new InvalidDataException($"Invalid child kind at {WorkbookProtocol.MetadataSheetName}!C{row}.");
+            var sheet = grid.Text(row, 4)
+                ?? throw new InvalidDataException($"Child table {ownerTableId}:{string.Join('.', ownerPath)} has no worksheet name.");
+            if (!int.TryParse(grid.Text(row, 5), NumberStyles.None, CultureInfo.InvariantCulture, out var dataRow)
+                || dataRow <= WorkbookProtocol.HeaderRows)
+            {
+                throw new InvalidDataException($"Child table '{sheet}' has an invalid data start row.");
+            }
+            tables.Add(new ChildTableMetadata(ownerTableId, ownerPath, kind, sheet, dataRow));
+        }
+        return tables;
+    }
+
     private static ImmutableArray<string> ReadMigrationMarkers(WorksheetGrid grid)
     {
         var markers = ImmutableArray.CreateBuilder<string>();
@@ -1715,6 +1982,57 @@ public static class XlsxWorkbookCodec
         }
 
         return paths;
+    }
+
+    private static IReadOnlyDictionary<(string OwnerKey, int Column), string> ReadChildFieldPaths(WorksheetGrid grid)
+    {
+        var paths = new Dictionary<(string OwnerKey, int Column), string>();
+        for (var row = 2; row <= grid.MaxRow; row++)
+        {
+            if (!string.Equals(grid.Text(row, 1), "child_field", StringComparison.Ordinal))
+                continue;
+            var id = grid.Text(row, 2) ?? string.Empty;
+            var first = id.IndexOf(':');
+            var second = first < 0 ? -1 : id.IndexOf(':', first + 1);
+            if (first <= 0 || second <= first + 1
+                || !TryParseChildOwnerKey(id[..second], out _, out _)
+                || !int.TryParse(grid.Text(row, 6), NumberStyles.None, CultureInfo.InvariantCulture, out var column)
+                || column <= 0)
+            {
+                throw new InvalidDataException($"Invalid child field metadata at row {row}.");
+            }
+            var ownerKey = id[..second];
+            if (!paths.TryAdd((ownerKey, column), id[(second + 1)..]))
+                throw new InvalidDataException($"Duplicate child field metadata for {ownerKey}, column {column}.");
+        }
+        return paths;
+    }
+
+    private static string ChildOwnerKey(int tableId, ImmutableArray<int> path) =>
+        $"{tableId.ToString(CultureInfo.InvariantCulture)}:{string.Join('.', path)}";
+
+    private static bool TryParseChildOwnerKey(
+        string? value,
+        out int tableId,
+        out ImmutableArray<int> path)
+    {
+        tableId = 0;
+        path = [];
+        var separator = value?.IndexOf(':') ?? -1;
+        if (separator <= 0
+            || !int.TryParse(value.AsSpan(0, separator), NumberStyles.None, CultureInfo.InvariantCulture, out tableId)
+            || tableId <= 0)
+            return false;
+        var builder = ImmutableArray.CreateBuilder<int>();
+        foreach (var segment in value![(separator + 1)..].Split('.'))
+        {
+            if (!int.TryParse(segment, NumberStyles.None, CultureInfo.InvariantCulture, out var fieldId)
+                || fieldId <= 0)
+                return false;
+            builder.Add(fieldId);
+        }
+        path = builder.ToImmutable();
+        return !path.IsEmpty;
     }
 
     private static KeyMap ReadKeyMap(Package package)
@@ -1807,6 +2125,122 @@ public static class XlsxWorkbookCodec
             columns.ToImmutableArray(),
             rows.ToImmutableArray());
     }
+
+    private static WorkbookChildTable ReadChildTable(
+        Package package,
+        string partName,
+        ChildTableMetadata metadata,
+        IReadOnlyDictionary<(string OwnerKey, int Column), string> fieldPaths)
+    {
+        var grid = ReadGrid(package, partName);
+        var systemColumns = ChildSystemColumnCount(metadata.Kind);
+        if (FindHeaderColumn(grid, 2, WorkbookProtocol.ParentGuidColumnName) != 1)
+            throw new InvalidDataException($"Child worksheet '{metadata.SheetName}' must start with {WorkbookProtocol.ParentGuidColumnName}.");
+        var identityName = metadata.Kind == CanonicalChildTableKind.RepeatedMessage
+            ? WorkbookProtocol.OrdinalColumnName
+            : WorkbookProtocol.MapKeyColumnName;
+        if (FindHeaderColumn(grid, 2, identityName) != 2)
+            throw new InvalidDataException($"Child worksheet '{metadata.SheetName}' must use '{identityName}' in column 2.");
+
+        var ownerKey = ChildOwnerKey(metadata.OwnerTableId, metadata.OwnerFieldIdPath);
+        var columns = new List<WorkbookColumn>();
+        for (var column = systemColumns + 1; column <= grid.MaxColumnAtRow(2); column++)
+        {
+            var displayName = grid.Text(1, column) ?? string.Empty;
+            var propertyPath = grid.Text(2, column)
+                ?? throw new InvalidDataException($"Child worksheet '{metadata.SheetName}' column {column} has no property path.");
+            var typeName = grid.Text(3, column) ?? "string";
+            var fieldPath = fieldPaths.GetValueOrDefault((ownerKey, column))
+                ?? throw new InvalidDataException($"Child worksheet '{metadata.SheetName}' column {column} has no numeric field path.");
+            columns.Add(new WorkbookColumn(displayName, propertyPath, typeName, fieldPath));
+        }
+
+        var rows = new List<WorkbookChildRow>();
+        var unique = new HashSet<string>(StringComparer.Ordinal);
+        for (var rowNumber = metadata.DataStartRow; rowNumber <= grid.MaxRow; rowNumber++)
+        {
+            if (!grid.HasAny(rowNumber, 1, grid.MaxColumnAtRow(2)))
+                continue;
+            var rawParent = grid.CellText(rowNumber, 1);
+            RowGuid? parent = RowGuid.TryParse(rawParent, out var parsed) ? parsed : null;
+            int? ordinal = null;
+            string? mapKey = null;
+            if (metadata.Kind == CanonicalChildTableKind.RepeatedMessage)
+            {
+                if (int.TryParse(grid.CellText(rowNumber, 2), NumberStyles.None, CultureInfo.InvariantCulture, out var parsedOrdinal)
+                    && parsedOrdinal > 0)
+                    ordinal = parsedOrdinal;
+            }
+            else
+            {
+                mapKey = grid.CellText(rowNumber, 2);
+            }
+            if (parent is { } validParent)
+            {
+                var childIdentity = metadata.Kind == CanonicalChildTableKind.RepeatedMessage
+                    ? ordinal?.ToString(CultureInfo.InvariantCulture) ?? string.Empty
+                    : mapKey ?? string.Empty;
+                if (childIdentity.Length == 0 || !unique.Add($"{validParent}:{childIdentity}"))
+                    throw new InvalidDataException($"Child worksheet '{metadata.SheetName}' has an invalid or duplicate child identity at row {rowNumber}.");
+            }
+            var values = ImmutableDictionary.CreateBuilder<string, WorkbookCell>(StringComparer.Ordinal);
+            for (var index = 0; index < columns.Count; index++)
+            {
+                var value = grid.Get(rowNumber, systemColumns + index + 1);
+                if (value is not null && !value.IsBlank)
+                    values[columns[index].PropertyPath] = value;
+            }
+            rows.Add(new WorkbookChildRow(
+                parent,
+                ordinal,
+                mapKey,
+                values.ToImmutable(),
+                rawParent,
+                rowNumber));
+        }
+        return new WorkbookChildTable(
+            metadata.OwnerTableId,
+            metadata.OwnerFieldIdPath,
+            metadata.Kind,
+            metadata.SheetName,
+            metadata.DataStartRow,
+            columns.ToImmutableArray(),
+            rows.ToImmutableArray());
+    }
+
+    private static IReadOnlyDictionary<(string OwnerKey, int Column), string> InferChildFieldPaths(
+        Package package,
+        string sheetName,
+        WorkbookChildTable layout,
+        IReadOnlyDictionary<(string OwnerKey, int Column), string> metadataPaths)
+    {
+        var result = new Dictionary<(string OwnerKey, int Column), string>();
+        var ownerKey = ChildOwnerKey(layout.OwnerTableId, layout.OwnerFieldIdPath);
+        var grid = ReadGrid(package, package.Sheets[sheetName]);
+        var systemColumns = ChildSystemColumnCount(layout.Kind);
+        for (var column = systemColumns + 1; column <= grid.MaxColumnAtRow(2); column++)
+        {
+            if (metadataPaths.TryGetValue((ownerKey, column), out var registered))
+            {
+                result[(ownerKey, column)] = registered;
+                continue;
+            }
+            var property = grid.Text(2, column) ?? string.Empty;
+            var match = layout.Columns.FirstOrDefault(candidate =>
+                string.Equals(candidate.PropertyPath, property, StringComparison.Ordinal)
+                || candidate.EffectiveAliases.Contains(property, StringComparer.Ordinal));
+            if (match is not null)
+                result[(ownerKey, column)] = match.FieldPath;
+        }
+        return result;
+    }
+
+    private static int ChildSystemColumnCount(CanonicalChildTableKind kind) => kind switch
+    {
+        CanonicalChildTableKind.RepeatedMessage => 2,
+        CanonicalChildTableKind.MessageMap => 2,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+    };
 
     private static int FindHeaderColumn(WorksheetGrid grid, int row, string value)
     {
@@ -2006,6 +2440,13 @@ public static class XlsxWorkbookCodec
         ImmutableArray<string> SharedStrings);
 
     private sealed record TableMetadata(int TableId, string ProtoName, string SheetName, int DataStartRow);
+
+    private sealed record ChildTableMetadata(
+        int OwnerTableId,
+        ImmutableArray<int> OwnerFieldIdPath,
+        CanonicalChildTableKind Kind,
+        string SheetName,
+        int DataStartRow);
 
     private sealed record KeyMap(
         IReadOnlyDictionary<(int TableId, RowGuid RowGuid), string?> ByIdentity,

@@ -2,7 +2,7 @@
 
 ExcelDB 正在以纯 C# 实现 M1–M8：`.proto` 定义结构，`.xlsx` 保存策划数据，工具生成 C# 与按目标划分的 runtime bytes；authoring、运行时、Unity adapter、兼容分析和迁移共享同一套身份、诊断与事务门禁。
 
-当前模块的设计状态均为 **Dependency-Complete**；实现正在按端到端验收矩阵收尾，未通过全部发行验收前统一视为 **Implementation-in-progress**。权威契约见 [规范总纲](docs/spec/README.md)，实际操作见 [使用流程](docs/usage.md)。
+当前 M1–M8 模块均为 **Dependency-Complete / Verified**：完整自动化矩阵、真实 XLSX 迁移、崩溃恢复和 Windows 单文件离线冒烟均已通过。权威契约见 [规范总纲](docs/spec/README.md)，实际操作见 [使用流程](docs/usage.md)。
 
 ## 最短使用流程
 

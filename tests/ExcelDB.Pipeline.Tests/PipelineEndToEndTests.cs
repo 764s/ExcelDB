@@ -3,9 +3,12 @@ using System.IO.Compression;
 using System.Text;
 using ExcelDb.Core.IO;
 using ExcelDb.Core.Diagnostics;
+using ExcelDb.Core.Values;
+using ExcelDb.Compatibility.Migrations;
 using ExcelDb.Pipeline;
 using ExcelDb.Runtime.Bytes;
 using ExcelDb.Schema.Authoring;
+using ExcelDb.Schema.Compilation;
 using ExcelDb.Tooling.Plans;
 using ExcelDb.Tooling.Project;
 using ExcelDb.Workbooks.Model;
@@ -47,6 +50,8 @@ public sealed class PipelineEndToEndTests : IDisposable
 
         var stale = await workbookPipeline.DataPrepareAsync(project);
         var independentlyPlanned = await workbookPipeline.DataPrepareAsync(project);
+        Assert.False(stale.Diagnostics.Any(static item => item.IsFailure),
+            string.Join(Environment.NewLine, stale.Diagnostics.Select(static item => $"{item.Code}: {item.Message}")));
         Assert.Single(stale.Mutations);
         Assert.Single(independentlyPlanned.Mutations);
         Assert.NotEqual(stale.Mutations[0].ContentBase64, independentlyPlanned.Mutations[0].ContentBase64);
@@ -192,6 +197,8 @@ public sealed class PipelineEndToEndTests : IDisposable
         File.WriteAllBytes(workbookPath, XlsxWorkbookCodec.Write(workbook with { Tables = tables }));
 
         var check = await workbooks.CheckAsync(Load());
+        Assert.False(check.Report.Diagnostics.Any(static item => item.IsFailure),
+            string.Join(Environment.NewLine, check.Report.Diagnostics.Select(static item => $"{item.Code}: {item.Message}")));
         Assert.Equal(0, (int)check.Report.ExitCode);
         var convert = await workbooks.ConvertAsync(Load(), "client", "Build/references.bytes");
         Assert.Equal(0, (int)convert.ExitCode);
@@ -435,6 +442,12 @@ public sealed class PipelineEndToEndTests : IDisposable
             }).ToImmutableArray(),
         };
         File.WriteAllBytes(workbookPath, XlsxWorkbookCodec.Write(populated));
+        var businessKeyColumn = itemTable.Columns
+            .Select((column, index) => (column, index))
+            .Single(item => item.column.FieldPath == "1").index + 1;
+        File.WriteAllBytes(workbookPath, XlsxWorkbookCodec.PatchCells(
+            File.ReadAllBytes(workbookPath),
+            [new CellPatch(itemTable.SheetName, itemTable.DataStartRow, businessKeyColumn, new WorkbookCell("blade"))]));
         var rekey = await pipeline.GenerateAsync(Load(), rekey: true);
         Assert.False(rekey.HasBlockers, string.Join(Environment.NewLine, rekey.Diagnostics.Select(static item => item.Message)));
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(rekey).ExitCode);
@@ -444,8 +457,147 @@ public sealed class PipelineEndToEndTests : IDisposable
         var holder = Assert.Single(after.Tables.Single(static table => table.TableId == 402).Rows);
         Assert.Equal(itemGuid, item.RowGuid);
         Assert.Equal(holderGuid, holder.RowGuid);
-        Assert.Equal(CanonicalKeyCodec.Format(["sword"]), item.Key);
-        Assert.Equal("401:sword", holder.Cells[holderRefProperty].Text);
+        Assert.Equal(CanonicalKeyCodec.Format(["blade"]), item.Key);
+        Assert.Equal("401:blade", holder.Cells[holderRefProperty].Text);
+    }
+
+    [Fact]
+    public async Task ConvertPreservesCompleteNumericPathForExpandedMessageFields()
+    {
+        Initialize();
+        File.WriteAllText(Path.Combine(_root, "Schema", "nested.proto"), """
+            syntax = "proto3";
+            package game;
+            import "exceldb/options.proto";
+            message Cost { int32 value = 7; }
+            message Hero {
+              option (exceldb.table) = { kind: ASSET, id: 510 };
+              string id = 1 [(exceldb.field) = { key: 1 }];
+              Cost cost = 2 [(exceldb.field) = { expand: EXPANDED_COLUMNS }];
+            }
+            """, new UTF8Encoding(false));
+        var schemas = new SchemaPipeline("test-v1");
+        var build = await schemas.BuildAsync(Load(), checkOnly: false);
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(build.Plan!).ExitCode);
+        var workbooks = new WorkbookPipeline("test-v1", schemas);
+        var workbookPath = Path.Combine(_root, "Data", "nested.xlsx");
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(
+            await workbooks.GenerateAsync(Load(), workbookPath)).ExitCode);
+
+        var workbook = XlsxWorkbookCodec.Read(File.ReadAllBytes(workbookPath));
+        var table = Assert.Single(workbook.Tables);
+        var idProperty = table.Columns.Single(static column => column.FieldPath == "1").PropertyPath;
+        var nestedProperty = table.Columns.Single(static column => column.FieldPath == "2.7").PropertyPath;
+        var row = WorkbookRow.Create(
+            ExcelDb.Core.Identity.RowGuid.Parse("00000000000000000000000000000510"),
+            0,
+            [
+                new KeyValuePair<string, WorkbookCell>(idProperty, new WorkbookCell("hero")),
+                new KeyValuePair<string, WorkbookCell>(nestedProperty, new WorkbookCell("42")),
+            ],
+            CanonicalKeyCodec.Format(["hero"]));
+        File.WriteAllBytes(workbookPath, XlsxWorkbookCodec.Write(workbook with
+        {
+            Tables = [table with { Rows = [row] }],
+        }));
+
+        var report = await workbooks.ConvertAsync(Load(), "client", "Build/nested.bytes");
+        Assert.Equal(0, (int)report.ExitCode);
+        var output = Path.Combine(_root, "Build", "nested.bytes");
+        using var snapshot = ConvertedBytesReader.Read(
+            File.ReadAllBytes(output),
+            File.ReadAllText(output + ".manifest.json")).Snapshot;
+        var fields = Assert.Single(snapshot.Assets).Fields;
+        Assert.Contains(fields, static field => field.FieldIdPath.SequenceEqual(new[] { 2, 7 })
+                                                && Encoding.UTF8.GetString(field.Data.Span) == "42");
+    }
+
+    [Fact]
+    public async Task ChildWorksheetsAggregateSimpleRowsIntoRepeatedAndMapRuntimeFields()
+    {
+        Initialize();
+        File.WriteAllText(Path.Combine(_root, "Schema", "children.proto"), """
+            syntax = "proto3";
+            package game;
+            import "exceldb/options.proto";
+            message Reward { string item_id = 4; int32 count = 9; }
+            message Hero {
+              option (exceldb.table) = { kind: ASSET, id: 520 };
+              string id = 1 [(exceldb.field) = { key: 1 }];
+              repeated Reward rewards = 3 [(exceldb.field) = { child_table: { sheet_name: "HeroRewards" } }];
+              map<string, Reward> reward_by_slot = 5;
+            }
+            """, new UTF8Encoding(false));
+        var schemas = new SchemaPipeline("test-v1");
+        var build = await schemas.BuildAsync(Load(), checkOnly: false);
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(build.Plan!).ExitCode);
+        var workbooks = new WorkbookPipeline("test-v1", schemas);
+        var workbookPath = Path.Combine(_root, "Data", "children.xlsx");
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(
+            await workbooks.GenerateAsync(Load(), workbookPath)).ExitCode);
+
+        var workbook = XlsxWorkbookCodec.Read(File.ReadAllBytes(workbookPath));
+        var parentGuid = ExcelDb.Core.Identity.RowGuid.Parse("00000000000000000000000000000520");
+        var table = Assert.Single(workbook.Tables);
+        Assert.Single(table.Columns);
+        var parent = WorkbookRow.Create(parentGuid, 0,
+            [new KeyValuePair<string, WorkbookCell>(table.Columns[0].PropertyPath, new WorkbookCell("hero"))]);
+        var repeated = workbook.EffectiveChildTables.Single(static child => child.OwnerFieldIdPath.SequenceEqual(new[] { 3 }));
+        var repeatedItem = repeated.Columns.Single(static column => column.FieldPath == "3.4").PropertyPath;
+        var repeatedCount = repeated.Columns.Single(static column => column.FieldPath == "3.9").PropertyPath;
+        var map = workbook.EffectiveChildTables.Single(static child => child.OwnerFieldIdPath.SequenceEqual(new[] { 5 }));
+        var mapItem = map.Columns.Single(static column => column.FieldPath == "5.4").PropertyPath;
+        var mapCount = map.Columns.Single(static column => column.FieldPath == "5.9").PropertyPath;
+        var children = workbook.EffectiveChildTables.Select(child => child.OwnerFieldIdPath[0] switch
+        {
+            3 => child with
+            {
+                Rows =
+                [
+                    WorkbookChildRow.Create(parentGuid, 2, null,
+                    [
+                        new KeyValuePair<string, WorkbookCell>(repeatedItem, new WorkbookCell("shield")),
+                        new KeyValuePair<string, WorkbookCell>(repeatedCount, new WorkbookCell("1")),
+                    ]),
+                    WorkbookChildRow.Create(parentGuid, 1, null,
+                    [
+                        new KeyValuePair<string, WorkbookCell>(repeatedItem, new WorkbookCell("coin")),
+                        new KeyValuePair<string, WorkbookCell>(repeatedCount, new WorkbookCell("3")),
+                    ]),
+                ],
+            },
+            5 => child with
+            {
+                Rows =
+                [
+                    WorkbookChildRow.Create(parentGuid, null, "daily",
+                    [
+                        new KeyValuePair<string, WorkbookCell>(mapItem, new WorkbookCell("gem")),
+                        new KeyValuePair<string, WorkbookCell>(mapCount, new WorkbookCell("2")),
+                    ]),
+                ],
+            },
+            _ => child,
+        }).ToImmutableArray();
+        File.WriteAllBytes(workbookPath, XlsxWorkbookCodec.Write(workbook with
+        {
+            Tables = [table with { Rows = [parent] }],
+            ChildTables = children,
+        }));
+
+        var report = await workbooks.ConvertAsync(Load(), "client", "Build/children.bytes");
+        Assert.Equal(0, (int)report.ExitCode);
+        var output = Path.Combine(_root, "Build", "children.bytes");
+        using var snapshot = ConvertedBytesReader.Read(
+            File.ReadAllBytes(output),
+            File.ReadAllText(output + ".manifest.json")).Snapshot;
+        var fields = Assert.Single(snapshot.Assets).Fields;
+        Assert.Equal(
+            "[{\"count\":3,\"item_id\":\"coin\"},{\"count\":1,\"item_id\":\"shield\"}]",
+            Encoding.UTF8.GetString(Assert.Single(fields, static field => field.FieldIdPath.SequenceEqual(new[] { 3 })).Data.Span));
+        Assert.Equal(
+            "{\"daily\":{\"count\":2,\"item_id\":\"gem\"}}",
+            Encoding.UTF8.GetString(Assert.Single(fields, static field => field.FieldIdPath.SequenceEqual(new[] { 5 })).Data.Span));
     }
 
     [Fact]
@@ -503,6 +655,74 @@ public sealed class PipelineEndToEndTests : IDisposable
         Assert.True(rejected.HasBlockers);
         Assert.Empty(rejected.Mutations);
     }
+
+    [Fact]
+    public async Task RealXlsxMigrationStagesVerifiesCommitsAndPersistsItsMarker()
+    {
+        Initialize();
+        var protoPath = Path.Combine(_root, "Schema", "migration.proto");
+        File.WriteAllText(protoPath, MigrationProto(includeTarget: false), new UTF8Encoding(false));
+        var schemas = new SchemaPipeline("test-v1");
+        var build = await schemas.BuildAsync(Load(), checkOnly: false);
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(build.Plan!).ExitCode);
+        var sourceCompilation = await new SchemaCompiler().CompileAsync(Path.Combine(_root, "Schema"));
+        Assert.True(sourceCompilation.Succeeded);
+        var sourceSchema = sourceCompilation.Descriptor!;
+        var workbooks = new WorkbookPipeline("test-v1", schemas);
+        var workbookPath = Path.Combine(_root, "Data", "migration.xlsx");
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(
+            await workbooks.GenerateAsync(Load(), workbookPath)).ExitCode);
+        var workbook = XlsxWorkbookCodec.Read(File.ReadAllBytes(workbookPath));
+        var table = Assert.Single(workbook.Tables);
+        var rowGuid = ExcelDb.Core.Identity.RowGuid.Parse("00000000000000000000000000000601");
+        var row = WorkbookRow.Create(rowGuid, 1,
+        [
+            new KeyValuePair<string, WorkbookCell>(table.Columns.Single(static column => column.FieldPath == "1").PropertyPath, new WorkbookCell("hero")),
+            new KeyValuePair<string, WorkbookCell>(table.Columns.Single(static column => column.FieldPath == "2").PropertyPath, new WorkbookCell("old")),
+        ]);
+        File.WriteAllBytes(workbookPath, XlsxWorkbookCodec.Write(workbook with
+        {
+            Tables = [table with { Rows = [row] }],
+        }));
+
+        File.WriteAllText(protoPath, MigrationProto(includeTarget: true), new UTF8Encoding(false));
+        var targetCompilation = await new SchemaCompiler().CompileAsync(Path.Combine(_root, "Schema"));
+        Assert.True(targetCompilation.Succeeded);
+        var targetSchema = targetCompilation.Descriptor!;
+        var participant = new XlsxMigrationWorkbookParticipant(workbookPath, sourceSchema, targetSchema);
+        var key = new MigrationKey("copy-name", 1);
+        var plan = MigrationPlanner.Create(
+            sourceSchema.SchemaHash,
+            targetSchema.SchemaHash,
+            [new MigrationStep(1, key, 601, [2], [3])],
+            [participant.ReadCurrent()],
+            new MigrationRegistry([new CopyNameMigration()]));
+
+        var report = MigrationCoordinator.Execute(plan, [participant]);
+
+        Assert.True(report.Succeeded, string.Join(Environment.NewLine, report.Diagnostics.Select(static item => item.Message)));
+        Assert.True(report.Applied);
+        var migrated = XlsxWorkbookCodec.Read(File.ReadAllBytes(workbookPath));
+        Assert.Equal(targetSchema.SchemaHash, migrated.SchemaHash);
+        Assert.Contains("copy-name@1", migrated.EffectiveMigrationMarkers);
+        var migratedRow = Assert.Single(Assert.Single(migrated.Tables).Rows);
+        Assert.Equal(rowGuid, migratedRow.RowGuid);
+        Assert.Equal("old", migratedRow.Cells["old_name"].Text);
+        Assert.Equal("old", migratedRow.Cells["new_name"].Text);
+        Assert.Empty(Directory.EnumerateFiles(Path.GetDirectoryName(workbookPath)!, "*.migration-*.stage"));
+    }
+
+    private static string MigrationProto(bool includeTarget) => $$"""
+        syntax = "proto3";
+        package game;
+        import "exceldb/options.proto";
+        message Hero {
+          option (exceldb.table) = { kind: ASSET, id: 601 };
+          string id = 1 [(exceldb.field) = { key: 1 }];
+          string old_name = 2;
+          {{(includeTarget ? "string new_name = 3;" : string.Empty)}}
+        }
+        """;
 
     private void Initialize()
     {
@@ -582,5 +802,15 @@ public sealed class PipelineEndToEndTests : IDisposable
         {
             yield return new Diagnostic("test.reject-key", DiagnosticSeverity.Error, context.Row.Location, "Key is forbidden.");
         }
+    }
+
+    private sealed class CopyNameMigration : ICanonicalValueMigration
+    {
+        public string Id => "copy-name";
+
+        public int Version => 1;
+
+        public MigrationResult Transform(in MigrationContext context, CanonicalValue source) =>
+            MigrationResult.Converted(source);
     }
 }

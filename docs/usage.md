@@ -124,6 +124,8 @@ sealed class AngleCellFormat : ICellFormat
 
 打开生成的 workbook，在第 4 行起填写业务列。新行的 `__guid` 保持空白；它表示 `pending-new`，不会在只读检查时被暗改。
 
+复杂消息不要求在一个单元格里手写大段 JSON。展开消息显示为普通简单列；重复消息和 message-map 显示为独立子表，使用者只填写 `__parent_guid`、`__ordinal`（或 `__map_key`）以及子消息的简单字段。导入器会按数字字段路径自动聚合，子表行不会变成可引用资产。
+
 内部引用填写稳定的人读 token：
 
 ```text

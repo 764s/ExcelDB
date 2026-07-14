@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using ExcelDb.Core.Diagnostics;
 using ExcelDb.Core.Identity;
@@ -278,6 +279,8 @@ public static class WorkbookImporter
             }
         }
 
+        MaterializeChildTables(workbook, schema, schemaTables, imported, diagnostics, cellFormats);
+
         var excludedLocations = new HashSet<string>(StringComparer.Ordinal);
         ExcludeDuplicateIdentities(imported, excludedLocations, diagnostics);
         ExcludeDuplicateKeys(imported, excludedLocations, diagnostics);
@@ -337,6 +340,10 @@ public static class WorkbookImporter
     {
         foreach (var field in fields)
         {
+            if (field.ChildTable is { } childTable
+                && field.FieldIdPath.AsSpan().SequenceEqual(childTable.OwnerFieldIdPath.AsSpan()))
+                continue;
+
             var fieldPath = !field.FieldIdPath.IsDefaultOrEmpty
                 ? string.Join('.', field.FieldIdPath)
                 : parentPath is null ? field.Id.ToString(CultureInfo.InvariantCulture) : $"{parentPath}.{field.Id}";
@@ -350,6 +357,207 @@ public static class WorkbookImporter
                 yield return new FieldBinding(field, fieldPath);
             }
         }
+    }
+
+    private static void MaterializeChildTables(
+        WorkbookDefinition workbook,
+        CanonicalSchemaDescriptor schema,
+        IReadOnlyDictionary<int, CanonicalTableDescriptor> schemaTables,
+        List<ImportedRow> imported,
+        ImmutableArray<Diagnostic>.Builder diagnostics,
+        CellFormatRegistry? cellFormats)
+    {
+        var parentRows = imported
+            .Select((row, index) => (row, index))
+            .Where(static item => item.row.Identity is not null)
+            .GroupBy(static item => item.row.Identity!.Value)
+            .ToDictionary(static group => group.Key, static group => group.ToArray());
+
+        foreach (var childTable in workbook.EffectiveChildTables
+                     .OrderBy(static table => table.OwnerTableId)
+                     .ThenBy(static table => string.Join('.', table.OwnerFieldIdPath), StringComparer.Ordinal))
+        {
+            if (!schemaTables.TryGetValue(childTable.OwnerTableId, out var ownerTable))
+                continue;
+            var ownerField = FindField(ownerTable.Fields, childTable.OwnerFieldIdPath);
+            if (ownerField?.ChildTable is null)
+            {
+                diagnostics.Add(new Diagnostic(
+                    "EXWB2020",
+                    DiagnosticSeverity.Error,
+                    childTable.SheetName,
+                    "Child worksheet has no matching schema owner field."));
+                continue;
+            }
+
+            var bindings = FlattenFieldBindings(ownerField.Children).ToArray();
+            var boundColumns = bindings.ToDictionary(
+                static binding => binding,
+                binding => ResolveColumn(childTable.Columns, binding));
+            var materialized = new Dictionary<AssetIdentity, List<(WorkbookChildRow Row, JsonObject Value)>>();
+            foreach (var sourceRow in childTable.Rows)
+            {
+                var rowNumber = sourceRow.SourceRowNumber ?? childTable.DataStartRow;
+                if (sourceRow.ParentRowGuid is not { } parentGuid)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "EXWB2021",
+                        DiagnosticSeverity.Error,
+                        $"{childTable.SheetName}!{rowNumber}",
+                        "Child row requires a valid parent row guid."));
+                    continue;
+                }
+
+                var identity = new AssetIdentity(childTable.OwnerTableId, parentGuid);
+                if (!parentRows.TryGetValue(identity, out var parents) || parents.Length != 1)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "EXWB2022",
+                        DiagnosticSeverity.Error,
+                        $"{childTable.SheetName}!{rowNumber}",
+                        $"Child row references missing or ambiguous parent '{parentGuid}'."));
+                    continue;
+                }
+
+                var value = new JsonObject();
+                var valid = true;
+                foreach (var binding in bindings.OrderBy(static binding => binding.FieldPath, StringComparer.Ordinal))
+                {
+                    var column = boundColumns[binding];
+                    WorkbookCell? cell = null;
+                    if (column is not null)
+                        sourceRow.Cells.TryGetValue(column.PropertyPath, out cell);
+                    var parsed = CanonicalCellParser.Parse(cell, binding.Field, schema, cellFormats);
+                    if (parsed.Error is not null)
+                    {
+                        diagnostics.Add(new Diagnostic(
+                            "EXWB2023",
+                            DiagnosticSeverity.Error,
+                            $"{childTable.SheetName}!{binding.Field.PropertyPath}{rowNumber}",
+                            parsed.Error));
+                        valid = false;
+                        continue;
+                    }
+
+                    if (parsed.Value.State is CanonicalValueState.Missing or CanonicalValueState.Defaulted)
+                    {
+                        if (parsed.Value.State == CanonicalValueState.Missing)
+                            continue;
+                    }
+                    SetJsonValue(value, ownerField, binding.Field, parsed.Value);
+                }
+
+                if (!valid)
+                    continue;
+                if (!materialized.TryGetValue(identity, out var values))
+                    materialized.Add(identity, values = []);
+                values.Add((sourceRow, value));
+            }
+
+            foreach (var (identity, values) in materialized)
+            {
+                JsonNode aggregate;
+                if (childTable.Kind == CanonicalChildTableKind.RepeatedMessage)
+                {
+                    aggregate = new JsonArray(values
+                        .OrderBy(static item => item.Row.Ordinal)
+                        .Select(static item => (JsonNode)item.Value)
+                        .ToArray());
+                }
+                else
+                {
+                    var map = new JsonObject();
+                    foreach (var item in values.OrderBy(static item => item.Row.MapKey, StringComparer.Ordinal))
+                        map[item.Row.MapKey!] = item.Value;
+                    aggregate = map;
+                }
+
+                var parent = parentRows[identity][0];
+                var currentParent = imported[parent.index];
+                var canonical = CanonicalValue.FromValue(CanonicalJson.Serialize(aggregate));
+                var valuesBuilder = currentParent.Values.ToBuilder();
+                var rawBuilder = currentParent.RawValues.ToBuilder();
+                valuesBuilder[ownerField.PropertyPath] = canonical;
+                rawBuilder[ownerField.PropertyPath] = canonical;
+                imported[parent.index] = currentParent with
+                {
+                    Values = valuesBuilder.ToImmutable(),
+                    RawValues = rawBuilder.ToImmutable(),
+                };
+            }
+        }
+    }
+
+    private static CanonicalFieldDescriptor? FindField(
+        IEnumerable<CanonicalFieldDescriptor> fields,
+        ImmutableArray<int> path)
+    {
+        IEnumerable<CanonicalFieldDescriptor> siblings = fields;
+        CanonicalFieldDescriptor? current = null;
+        foreach (var id in path)
+        {
+            current = siblings.FirstOrDefault(field => field.Id == id);
+            if (current is null)
+                return null;
+            siblings = current.Children;
+        }
+        return current;
+    }
+
+    private static void SetJsonValue(
+        JsonObject root,
+        CanonicalFieldDescriptor owner,
+        CanonicalFieldDescriptor leaf,
+        CanonicalValue value)
+    {
+        var relativePath = leaf.FieldIdPath.Skip(owner.FieldIdPath.Length).ToArray();
+        JsonObject target = root;
+        IEnumerable<CanonicalFieldDescriptor> siblings = owner.Children;
+        for (var index = 0; index < relativePath.Length; index++)
+        {
+            var descriptor = siblings.Single(field => field.Id == relativePath[index]);
+            var propertyName = descriptor.Name;
+            if (index == relativePath.Length - 1)
+            {
+                target[propertyName] = ToJsonNode(value, descriptor);
+                return;
+            }
+
+            if (target[propertyName] is not JsonObject nested)
+            {
+                nested = new JsonObject();
+                target[propertyName] = nested;
+            }
+            target = nested;
+            siblings = descriptor.Children;
+        }
+    }
+
+    private static JsonNode? ToJsonNode(CanonicalValue value, CanonicalFieldDescriptor field)
+    {
+        if (value.State == CanonicalValueState.Null)
+            return null;
+        var text = value.Text ?? string.Empty;
+        if (field.Shape is CanonicalFieldShape.Message
+            or CanonicalFieldShape.RepeatedMessage
+            or CanonicalFieldShape.RepeatedScalar
+            or CanonicalFieldShape.RepeatedEnum
+            or CanonicalFieldShape.Map)
+            return JsonNode.Parse(text);
+        if (field.Shape == CanonicalFieldShape.Enum)
+            return long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var enumNumber)
+                ? JsonValue.Create(enumNumber)
+                : JsonValue.Create(text);
+        return field.TypeName switch
+        {
+            "bool" => JsonValue.Create(bool.Parse(text)),
+            "double" or "float" => JsonValue.Create(double.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture)),
+            "int32" or "sint32" or "sfixed32" or "int64" or "sint64" or "sfixed64" =>
+                JsonValue.Create(long.Parse(text, NumberStyles.Integer, CultureInfo.InvariantCulture)),
+            "uint32" or "fixed32" or "uint64" or "fixed64" =>
+                JsonValue.Create(ulong.Parse(text, NumberStyles.Integer, CultureInfo.InvariantCulture)),
+            _ => JsonValue.Create(text),
+        };
     }
 
     private static IEnumerable<CanonicalFieldDescriptor> FlattenFields(
