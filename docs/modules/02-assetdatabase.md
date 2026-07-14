@@ -66,7 +66,7 @@ Assert(AssetDatabase.GetMainAssetTypeAtPath(Fireball) == typeof(SkillConfig));
 
 ## 3. 挂载、刷新与导入事件
 
-- `MountWorkbook`/`UnmountWorkbook` 是 Unity 没有的入口(Δ1):Unity 的搜索域 = 整个工程,ExcelDB 的域 = 显式挂载集。宿主引导(Unity adapter 启动、CLI)按 `ExcelDb.Project.json` 的 `workbooks` glob 逐本挂载(P§3)。
+- `MountWorkbook`/`UnmountWorkbook` 是 Unity 没有的入口(Δ1):Unity 的搜索域 = 整个工程,ExcelDB 的域 = 显式挂载集。宿主引导(Unity adapter 启动、CLI)递归发现 Project v2 `excelDir` 下的业务 `.xlsx`，排除 `~$` 临时文件与隐藏工具文件后逐本挂载(M4§2)。
 - `Refresh()` 语义同 Unity:扫描外部变化并导入(走 P§6.1 导入、必要时 P§6.3 合并)。watcher(P§6.8)自动触发同一路径,手调是兜底。
 - `ImportAsset(path)` 只接受 workbook 路径:单本强制走导入管线;`ImportAssetOptions.ForceUpdate` 忽略内容指纹(Δ9)。
 - `workbookImported` 在每次导入完成后派发(挂载、Refresh、ImportAsset、watcher 触发各算一次);Unity 对应物是 `AssetPostprocessor.OnPostprocessAllAssets`,ExcelDB 以事件而非基类交付(Δ1)。

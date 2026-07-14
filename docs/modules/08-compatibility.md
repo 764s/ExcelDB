@@ -1,6 +1,6 @@
 # 模块 8:兼容与迁移
 
-设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M8 兼容与迁移领域的唯一 owner；跨模块权威规则与架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文定义“schema 变化后如何保留数据并显式处理破坏操作”。身份与声明严格以 M1 为准:表 = `(exceldb.table).id`,字段 = proto field number,枚举值 = enum number,oneof variant = field number;`aliases`/`legacy` 是兼容输入,不是身份。归档 C# 特性方案及 `FormerName` 无规范效力。后续引用本文记作 M8§x。
+设计状态：**Dependency-Complete**；实现状态：**Pending verification**。本文是 M8 兼容与迁移领域的唯一 owner；跨模块权威规则与架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文定义“schema 变化后如何保留数据并显式处理破坏操作”。身份与声明严格以 M1 为准:表 = `(exceldb.table).id`,字段 = proto field number,枚举值 = enum number,oneof variant = field number;`aliases`/`legacy` 是兼容输入,不是身份。Project v2 把必须版本化的发布历史固定在 `.exceldb/published`；隐藏位置不降低其兼容证据地位。归档 C# 特性方案及 `FormerName` 无规范效力。后续引用本文记作 M8§x。
 
 ## 1. 范围与总则
 
@@ -26,6 +26,9 @@
 - previous/current descriptor 都必须由同一 canonical 编译规则产生。proto 文件顺序、空白和普通注释变化不得制造 diff。
 - previous descriptor 缺失时允许 lint/check 当前 schema与只读扫描 workbook,但禁止自动判定 rename、删除清理、类型重解释或 destructive apply。
 - descriptor 快照是可重建/版本化的机器工件,不是第二 schema 事实源;当前手写 proto 始终是声明事实源。
+- Project v2 的 previous published descriptor 与按 hash 索引固定写入 `<ProjectRoot>/.exceldb/published/`，并必须进版本控制。`.exceldb/cache` 中的 descriptor 只能加速当前编译，不得充当发布历史；删除 cache 不得删除或改变 published 历史。
+- 发布历史由显式 publish 操作在本次全部 target registry/codegen/bytes/manifest 闭包验证成功后更新；普通 build/generate/check/convert 单次成功、系统 proto 镜像修复或 Project Hub Inspect 均不得推进 previous published 指针。
+- published 路径是工具拥有的隐藏机器工件，只在兼容诊断/高级入口中显示。内容损坏或缺失时按本节历史缺失规则降级并阻断需要历史证明的转换，不得从生成 C#、bytes、cache 或镜像猜测补回。
 - 生成代码只用于新鲜度检查;手改或旧生成代码不能参与兼容分类。
 - diff 条目必须可定位到 table id、field id/enum number/variant number及 old/new descriptor path,并确定序输出。
 
@@ -142,6 +145,7 @@ membership 是同一 authoring field identity 的 runtime projection 集合,不�
 - 新字段缺值/default 的 canonical 读取结果沿用 M6§9.1 真值表：raw Missing 与 effective Defaulted 可区分；不得借结构刷新批量把 default 写入旧行,除非显式 materialize operation。
 - apply写临时文件,复读计划内canonical值与descriptor/metadata映射,成功后原子替换;失败保留原文件和dirty/migration状态。
 - 多 workbook引用、rekey或迁移形成同一语义闭包时,plan/gate必须先完整列出所有workbook;任一preflight blocker则零写入。commit 使用 M6§9.3 的全闭包 staging+backup+journal 可恢复事务。
+- 当兼容计划同时修改 Project 内 proto/xlsx/published 与 Project 外 Generated C# 根时，mutation 必须使用 M4 MutationPlan v2 的声明根；跨根失败按 recovery journal 回滚。published 指针只有在所有根和全部目标发布闭包成功后才可前移。
 
 ## 8. 显式破坏操作
 
@@ -222,3 +226,5 @@ M1 v1 的完整单一 `schema_hash` 包含名称、类型/shape、全部 export 
 10. target 发布闭包:加入、移除、移动 membership 后 field number 与 xlsx cell 不变,完整 SchemaHash 改变；client/server generated registry、codegen、bytes header、manifest 全部重建到同一新 hash且分别携带正确 target。任意混入旧 hash、错 target、只更新单侧移动结果均门禁失败且不发布混合工件。
 11. lint/generate/import/save/normalize/convert/runtime对同一compatibility输入得到一致或更严格门禁,无入口特例。M7 分别拒绝同 hash 错 target、同 target 错 hash及 Switch/Refresh 换 target,只有 Close+Open 可切换。
 12. SchemaHash 决策门禁:断言不存在 target view hash,所有 runtime 身份均使用 `(SchemaHash,ExportTargetId)`；content/codegen hash 不得绕过此门禁。
+13. Project v2 发布历史:首次发布、连续发布、cache 全删、fresh clone、published 缺失/损坏各一例；断言 previous 只从 `.exceldb/published` 选择，普通 generate/convert 和系统 import 修复不推进历史。需要历史证明的 retire/purge/rekey 在历史缺失时拒绝。
+14. 多根发布:Project 内 proto/xlsx/published 与外部 Generated C# 同一发布计划分别注入提交失败和进程中断，断言 recovery 后 previous 指针不会领先于任一 target registry/codegen/bytes，也不会留下混合 hash。

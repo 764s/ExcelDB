@@ -1,6 +1,6 @@
 # 模块 1:Schema 契约
 
-设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M1 Schema 领域的唯一 owner；跨模块权威规则、状态和架构决策见 [`docs/spec/README.md`](../spec/README.md)。声明方式 = `.proto` + exceldb options；`.proto` 可由程序直接编辑，也可由交互向导事务性维护，不要求手写；生成的 C# 类型是消费层投影，不是事实源。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
+设计状态：**Dependency-Complete**；实现状态：**Pending verification**。本文是 M1 Schema 领域的唯一 owner；跨模块权威规则、状态和架构决策见 [`docs/spec/README.md`](../spec/README.md)。声明方式 = `.proto` + exceldb options；`.proto` 可由程序直接编辑，也可由结构化工具事务性维护，不要求手写；生成的 C# 类型是消费层投影，不是事实源。Project v2 新增的系统 proto 磁盘镜像只用于编辑器 import 解析，同样不是事实源。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
 
 ## 1. 声明方式与身份规则
 
@@ -337,15 +337,40 @@ message SkillConfig {
 
 正式 Schema Tooling 是 self-contained CLI 的内嵌能力,而不是外部环境前置条件:
 
-- M4 提供 Project `schemaDir`;M1 递归枚举其下 `*.proto`,统一为 schemaDir-relative `/` 路径并按 ordinal 排序。首表创建前空输入集合法,其余 schema 操作遇空集为用法错误。
-- `schemaDir` 是唯一业务 import root;业务/第三方 proto 必须用相对该目录的 import 路径,禁止随 cwd 或当前文件目录改变解析结果,也禁止 `..` 逃逸。`google/protobuf/*` 与 `exceldb/options.proto` 只从内嵌系统 import 解析。
+- M4 提供 Project v2 的 `schemaDir`;M1 递归枚举其下 `*.proto`,统一为 schemaDir-relative `/` 路径并按 ordinal 排序。首表创建前空输入集合法,其余 schema 操作遇空集为用法错误。§5.1 catalog 登记的系统镜像路径必须先验证再从业务 source-set 排除。
+- `schemaDir` 是唯一业务 import root;业务/第三方 proto 必须用相对该目录的 import 路径,禁止随 cwd 或当前文件目录改变解析结果,也禁止 `..` 逃逸。`google/protobuf/*` 与 `exceldb/options.proto` 的编译内容只从内嵌系统 catalog 解析；同路径磁盘镜像不能覆盖 catalog。
 - lint、结构化 mutation、descriptor/codegen、workbook 布局、check/import 与 convert 等所有 schema consumer,每次操作都必须从当时 schemaDir 的完整当前 proto 集进入上述同一编译管线。生成 C#、程序集、旧报告或 cache 中的 descriptor 都不是 schema 输入,不得在当前 proto 已变化时继续驱动下游。
 - descriptor、调试 json、输入摘要与 generated registry cache 全是可删除派生物。实现可以在完整校验当前 proto 内容摘要与锁定工具身份后复用 cache 加速,但删除/污染/过期 cache 必须只触发从 schemaDir 重建,不得改变 descriptor、schema_hash、诊断或产物字节。
-- 发布物必须随包携带锁定版本的 proto parser/compiler、`google/protobuf/descriptor.proto`、`exceldb/options.proto`、最小 proto 发射资源与 `DefaultTableInitializer`；这些资源不构成可配置的表模板语言。实现可以使用库或受控同包组件,但不得按 PATH 查找 `protoc`、`dotnet` 或其他 schema 构建程序。
+- 发布物必须随包携带锁定版本的 proto parser/compiler、完整 `google/protobuf/*` 系统 proto 集、`exceldb/options.proto`、最小 proto 发射资源与 `DefaultTableInitializer`；这些资源不构成可配置的表模板语言。实现可以使用库或受控同包组件,但不得按 PATH 查找 `protoc`、`dotnet` 或其他 schema 构建程序。
 - 系统 import 从内嵌资源解析,业务与第三方 import 只从 Project 声明的本地输入解析；缺失即本地诊断并中止,不得尝试联网恢复、下载 SDK/package 或调用包管理器。
 - 同一发布物在 PATH 清空、网络拒绝且机器未安装 protoc/.NET SDK 的环境中,必须可从 `.proto` 完成 descriptor、schema_hash 与全部 §6 codegen。内嵌工具版本记录在 descriptor/报告中但不进入 schema_hash。
 - 一次编译先在暂存区形成 FileDescriptorSet、candidate SchemaDescriptor/hash、全部 C# 与 `RuntimeSchemaRegistry`,再统一 lint/自检。普通 build 只在全部成功后替换派生物;结构化 mutation 还必须把 candidate proto 与这些派生物作为一个提交单元。任一步失败均保留原 proto 与上一组完整派生物,不得让新 descriptor、旧 registry 或局部 C# 可见。
 - previous published descriptor 只作为 retired/M8 历史转换 lint 的显式对照输入;当前 candidate 始终只由当前 schemaDir 编译。previous 缺失时可以重建并消费一个已经发布的当前 schema,但不得批准 live→retired、删除/复活 tombstone等需要历史证明的新发布转换。
+
+### 5.1 系统 proto catalog 与编辑镜像
+
+EXE 内只有一个 canonical 系统 proto 来源。实现须公开以下只读能力供编译器、镜像修复和计划指纹共用，禁止编译器与镜像器各维护一份资源表：
+
+```csharp
+public interface ISystemProtoCatalog
+{
+    string CatalogHash { get; }
+    IReadOnlyList<SystemProtoFile> Files { get; }
+    bool TryGet(string logicalPath, out SystemProtoFile file);
+}
+
+public sealed record SystemProtoFile(
+    string LogicalPath,
+    ReadOnlyMemory<byte> CanonicalBytes,
+    string Sha256);
+```
+
+- catalog 至少覆盖 `exceldb/options.proto` 及该文件和业务 proto 可能传递导入的完整随包 `google/protobuf/*` 集。`LogicalPath` 使用 `/`、不得为绝对路径或包含 `.`/`..`;文件按 logical path ordinal 排序；`CatalogHash` 由完整 `(path,bytes)` 集确定性计算。
+- 初始化、显式“修复 Proto 依赖”和重新生成的 MutationPlan 把 catalog 镜像为 `<schemaDir>/exceldb/options.proto` 与 `<schemaDir>/google/protobuf/*.proto`，并把所有权、逐文件 SHA-256 与 catalog hash 写入 `.exceldb/system-imports.json`。该记录随 Project 配置版本化。
+- 镜像只服务普通编辑器的 import 跳转/补全。Windows 上两个系统目录设置 Hidden、文件设置 ReadOnly；`<schemaDir>/.gitignore` 忽略 `/exceldb/` 与 `/google/protobuf/`。属性设置失败是 warning，不能改变 canonical 文件内容或领域工件。
+- source-set 扫描遇 catalog reserved path 时先逐字节验证。内容与 catalog 相同且所有权记录一致时排除；缺失或旧 catalog 可由修复计划补齐；内容或所有权记录不符时结构写操作 blocker 并要求显式修复。未被 catalog 登记的 `exceldb/*` 或 `google/protobuf/*` 一律 blocker，不得作为业务 schema 编译。
+- 镜像、`.exceldb/system-imports.json`、文件属性及其修复状态不得进入业务 proto source-set、source fingerprint、canonical descriptor、SchemaHash、业务 lint 或 proto emitter。镜像存在、缺失、旧版和修复后的同一业务输入必须得到字节相同的 descriptor、C# 与 target bytes。
+- 编译器始终从 catalog 解析 reserved imports；不得因磁盘镜像缺失而报告 `exceldb/options.proto` 或随包 Google import 不存在，也不得把项目镜像内容悄悄当成编译输入。真正缺失的非系统 import 仍须报告完整 import chain。
 
 descriptor 模型(数字 id 为主键,树形):
 
@@ -399,7 +424,7 @@ XDB020 export target id 非法/重复,显式 target 集与非默认 legacy expor
 生成器消费 SchemaDescriptor(不使用 protoc 的 C# 插件),同时生成全量 authoring surface 与每个 export target 的独立 runtime surface:
 
 1. authoring 强类型类:live ASSET 与被 live schema 使用的 EMBEDDED 均为普通 C# 类/结构,包含全量 authoring 字段,无库基类与 `name`/`GetInstanceID` 成员。C# 成员 PascalCase,绑定表记录 field id ↔ C# 成员 ↔ property path(= proto 字段名)。
-2. target runtime 强类型面:对 descriptor 中每个稳定 target id 独立投影表、字段、EMBEDDED 依赖与读取 API。某 target 不可见的字段不得出现在该 runtime surface 或透过反射/侧表读取;物理文件、namespace、conditional compilation 或 assembly 分组可在实施时选择,但 `generatedDir` 中必须有可确定区分的 target 产物清单。
+2. target runtime 强类型面:对 descriptor 中每个稳定 target id 独立投影表、字段、EMBEDDED 依赖与读取 API。某 target 不可见的字段不得出现在该 runtime surface 或透过反射/侧表读取。Project v2 的物理包装固定为 `<generatedCSharpDir>/Authoring/` 与 `<generatedCSharpDir>/Runtime/<target-id>/`；target id 必须先按 M1 语法校验再作为单个目录段使用，不得逃逸输出根。
 3. cell 解析器与写出器:authoring 面覆盖全量 canonical 字面量 ↔ 字段值;target Excel source 只绑定该 target runtime surface 所需路径。结构文法经声明器生成,不用反射。
 4. target bytes 访问器:每个 target 只为已导出列生成偏移直读绑定(格式由 M7 定)。
 5. target patcher:只对当前 target 可见字段做实例级 diff 与就地覆写(hot reload 用)。
@@ -409,6 +434,12 @@ XDB020 export target id 非法/重复,显式 target 集与非默认 legacy expor
 9. 内嵌身份常量:每个 target 生成类型、registry `ExpectedSchemaHash`/`ExpectedExportTarget` 必须来自同一 candidate descriptor 与 target projection;运行期由 M7 把 registry 期望的 `(schema_hash,target_id)` 与 Excel/bytes source 硬比较。v1 固定使用完整单 hash + target id，不另增 target runtime hash。
 
 retired table 不产生任何 authoring/runtime 新类型、cell parser/writer、bytes accessor、patcher、属性树元数据或 registry binding,也不进入任何 target bytes table 集。空 target 集的 live 表仍产生 authoring surface,但不产生 target runtime surface。一次 codegen 必须按 candidate 的完整 authoring + target 输出清单原子替换派生物,禁止旧 target 类型或 binding 残留为幽灵读取面。
+
+`<generatedCSharpDir>/codegen.manifest.json` 是 codegen 对生成根的唯一所有权清单：
+
+- manifest 确定序记录工具版本、SchemaHash、catalog hash、每个逻辑输出路径及内容 hash；只允许删除上一份有效 manifest 明确拥有且仍位于声明根内的文件。
+- 目标路径存在未拥有文件、manifest 无法验证或路径经 symlink/junction 逃逸声明根时 blocker。未知文件和未知目录永不因普通 generate 被清理。
+- generated C# 根可位于 Project 外；M1 只产出声明根相对 mutation，声明根、跨根计划与恢复协议归 M4。相同 proto 与 catalog 在任意合法绝对落点生成的文件内容和 manifest 逻辑项必须相同，物理绝对路径不得进入生成源码或 SchemaHash。
 
 ## 7. 模块验收测试
 
@@ -434,12 +465,14 @@ retired table 不产生任何 authoring/runtime 新类型、cell parser/writer�
 20. per-target generated registry/runtime surface:分别生成 client/server registry,反射断言二者不可变、无运行时 Register/Replace API,`ExpectedSchemaHash == SchemaDescriptor.SchemaHash`,`ExpectedExportTarget` 分别为正确 `ExportTargetId`,binding 按该 target 可见的 live table id 确定序且不含 retired。client-only/server-only/空集字段只出现在对应或任何 runtime surface 之外,不得经反射/侧表绕过；相同完整 hash 的 client/server 仍因 target id 不同而不可互换。分别污染/删除 descriptor cache、旧 target C# 与旧 registry 后运行 descriptor/codegen、layout、check/import、convert consumer,断言都重新观察 schemaDir 当前 proto并得到同一 hash/对应 target 绑定；过期 cache 不得让任何 consumer 接受旧 schema/target。
 21. 表初始化器:内置 initializer 仅用表名、一个简单 key 与数个简单字段产生有效 live ASSET draft,自动字段/option 全部进候选 proto 与计划。注册一个简单 C# initializer 自动补一字段及 option,断言与直接产生同一 draft 时的 proto/descriptor/C# 逐字节等价。异常、重名字段、非标量 key 或其他非法输出均报 blocker 且零替换；提交后删除 initializer/会话/cache 仍能仅凭 proto 得到相同下游结果。
 22. 导出目标策略:标准策略为未指定表补 `{client,server}`,为未指定字段复制父 effective set；显式 client-only 表下的未指定字段保持 client-only,字段显式 client-only/server-only/空集选择均不被覆盖。注册一个确定性 C# 策略补 `lite-client`,断言预览展示其全部 effective 集且确认后以显式 target id 写入 candidate proto。策略异常、输出非法/重复 id、扩大父集或破坏 key/ref target 闭包均报 blocker 且零替换；提交后删除/替换策略并清空会话/cache,build/codegen/check/convert 仍仅凭 proto 得到相同 descriptor/hash/target 产物,且策略 `Id` 不改变 canonical 结果。
+23. 系统 import 编辑镜像:初始化后普通文件解析能找到 `exceldb/options.proto` 与全部传递 Google imports；镜像存在、缺失、旧版及修复后编译同一业务 proto，descriptor、SchemaHash、C# 与 bytes 均逐字节相同。修改镜像、伪造所有权记录、增加未登记 reserved path 分别产生准确 blocker；真正缺失的业务 import 报完整 import chain。Windows Hidden/ReadOnly 设置与幂等修复另覆盖 warning 路径。
+24. codegen 所有权:默认与项目外 `generatedCSharpDir` 均生成固定 `Authoring/Runtime/<target>` 包装和 canonical manifest。未知文件不删除、已拥有旧文件可清理、路径碰撞/损坏 manifest/symlink 或 junction 逃逸均 blocker；改变绝对落点不改变源码、逻辑 manifest 或 SchemaHash。
 
 ## 8. 与仓库现状衔接
 
 - 旧实现(`ConfigDatabase`/`ExcelTableLoader`/SkillEditor 样例/旧测试/excels 样例数据)已于 2026-07-09 整体移除(D11);历史实现经 git 历史查阅,`UndoStack`/`DependencyGraph`/xlsx IO 需要时按件回捞参考。
 - 用于验证部分 schema 契约的旧 `poc/SchemaPoc` 已按用户要求于 2026-07-13 删除,不作为正式工程起点,也不从中迁移实现代码。
-- M1 正式工程与本模块自动化验收已落地：内嵌 schema 编译、canonical descriptor/hash、lint、codegen、初始化器与导出目标策略均由纯 C# 工程投影，并遵守总纲 §5 的组件边界。`options.proto` 保持相对 v1(git 历史)的兼容姿态:`TableOptions` 沿用 50001 号位,50011-50015 reserved,`ExternalRef` 由 reference family 取代；proto parser/descriptor 依赖仅存在于 Schema Tooling,不得进入 Core Runtime。
+- M1 既有纯 C# 实现已覆盖内嵌 schema 编译、canonical descriptor/hash、lint、codegen、初始化器与导出目标策略；Project v2 的完整 system proto catalog、编辑镜像排除、固定 C# 包装和所有权 manifest 尚待按 §7 第 23-24 条重验，故本模块实现状态保持 Pending verification。`options.proto` 保持相对 v1(git 历史)的兼容姿态:`TableOptions` 沿用 50001 号位,50011-50015 reserved,`ExternalRef` 由 reference family 取代；proto parser/descriptor 依赖仅存在于 Schema Tooling,不得进入 Core Runtime。
 
 ## 9. 跨模块边界与架构决策
 
@@ -631,3 +664,13 @@ retired table 不产生任何 authoring/runtime 新类型、cell parser/writer�
 **有限 PoC 不再承担正式实现的衔接职责；工作区回到规范驱动状态,后续实现从 M1 的模块验收开始逐项建立。**
 
 落点:§8 仓库现状衔接；总纲 M1 实现状态回到 Not implemented。
+
+---
+
+### D17(2026-07-14)系统 proto 磁盘镜像只解决编辑器 import，编译仍信任内嵌 catalog
+
+> proto 内部 import 的文件会被提示不存在, 想办法解决这一点.
+
+**同一份内嵌 catalog 同时喂给编译器和镜像修复器，才能既让普通编辑器在磁盘找到 import，又保证隐藏镜像不会悄悄变成第二 schema、改变 fingerprint 或污染 descriptor；codegen 也必须用 manifest 证明自己只清理自己拥有的文件。**
+
+落点:§5.1 system proto catalog/镜像与 reserved path 排除，§6 固定 C# 包装和 manifest，§7 第 23-24 条；本裁决覆盖旧的“系统 import 只从内嵌资源解析且无需磁盘投影”在编辑器体验上的缺口，但不改变编译事实源。

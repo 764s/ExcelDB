@@ -108,7 +108,7 @@ public static class RuntimeDatabase
 - `Open` 必须同时显式取得初始 `source`、generated `RuntimeSchemaRegistry` 与 `RuntimeBootstrapOptions`;三者都不可省略。允许宿主 facade 把 generated registry 静态绑定后提供等价入口,但该入口必须不可被未生成/调用方自造的 hash/target 替代,也不得从 source、bytes header、manifest、Project、cache 或环境状态推导 expected hash/target。
 - `source` 是 session 初始源的显式选择；source 与 registry 的 ExportTargetId 共同构成当次显式 target 选择。`RuntimeBootstrapOptions.Mode` 是能力模式的显式输入，`EnableHotReload = true` 是初始热载的显式 opt-in；client/server target 不得编码为新的 RuntimeMode 或由 Mode 推断。session 建立后的源变化只经 `SwitchDataSource`，热载变化只经 `EnableHotReload`/`DisableHotReload`。
 - generated registry 是不可变注册工件。成功 `Open` 捕获 registry 引用、`ExpectedSchemaHash`、`ExpectedExportTarget` 与生成绑定,把 `(SchemaHash, ExportTargetId)` 固定为 session runtime 身份；失败 Open 不得残留半绑定 registry/hash/target。`SwitchDataSource`/`Refresh` 只能针对同一 registry、同一 hash、同一 target 验证 candidate,不存在运行中替换 registry 或 target 的 API。要切换生成代码、schema registry 或 ExportTargetId 必须先 `Close`,再以匹配的新 registry/source 显式 `Open` 新 session。
-- EditorPlayDebug 与 Development 不存在隐式 Excel 源或热载默认值，也不得从 `ExcelDb.Project.json`、EditorPrefs 或上次会话恢复这些选择。宿主 adapter 可以提供 UI，但 UI 必须把当次选择逐项传入上述 bootstrap/API，而不是维护第二配置源。
+- EditorPlayDebug 与 Development 不存在隐式 Excel 源或热载默认值，也不得从 `.exceldb/project.json`、Project Hub 最近记录、EditorPrefs 或上次会话恢复这些选择。宿主 adapter 可以提供 UI，但 UI 必须把当次选择逐项传入上述 bootstrap/API，而不是维护第二配置源。
 - 每次 bootstrap、Open/Switch 与热载启停都必须投 Diagnostic，至少记录请求模式、请求/生效 source kind、registry expected schema hash/target、source 声明/实际 schema hash/target、session 当前 hash/target、请求/生效 hot-reload 状态以及拒绝原因；宿主报告只投影同一组 Diagnostic，不另算结果。
 - `LoadAsset` 是便捷/低频入口,允许初始化期物化;`TryGetAsset`/caller-owned buffer 是热路径入口。
 - `GetAssets` buffer 不足时返回 `Truncated`,`count` 是完整所需数量;禁止为补齐结果临时分配数组。

@@ -24,6 +24,7 @@ ExcelDB 不是普通的 Excel 读取库，而是以 Excel 为一等 authoring �
 - 运行时可消费 Excel 源与 converted bytes 源，并以事务方式打开、刷新和切换；失败保留旧数据。
 - Unity 2022.3 是首要 adapter，但 Core、schema、workbook、convert 和 runtime 契约不得依赖 UnityEngine/UnityEditor。
 - Unity-like 只约束 facade 的使用手感，不要求生成数据类继承 Unity 或 ExcelDB 基类。
+- 用户视角只存在四类项目工件：`Schema`、`Excel`、`Generated/CSharp` 与 `Generated/Bytes`。项目配置、发布历史、cache、计划、报告和恢复日志属于隐藏内部状态，不得与四类工件并列成为普通用户流程。
 
 ## 3. 事实源与派生工件
 
@@ -33,10 +34,12 @@ ExcelDB 不是普通的 Excel 读取库，而是以 Excel 为一等 authoring �
 | `*.xlsx` | 数据事实源与 authoring 存盘对象 | 数据区由策划与编辑器共同编辑；结构区是 schema 投影；系统必须保留非拥有内容 |
 | row metadata | 资产身份事实 | 与数据同行持久化；key、sheet、header、asset path 只是可变定位信息 |
 | 生成代码(全量 authoring 类型 + 每 target runtime 类型/`RuntimeSchemaRegistry`) | schema 投影 | 可重新生成；每个 registry 固化代码期望的 `(SchemaHash,ExportTargetId)` 与该 target 的 live table/type/factory/accessor 绑定；不得手改为第二事实源 |
-| 本地快照/cache | 非事实源 | 仅提供合并 base、索引与恢复辅助；不得成为跨机器身份的唯一载体 |
+| 本地快照/cache | 非事实源 | 位于 `.exceldb/cache` 等隐藏内部目录；仅提供合并 base、索引与恢复辅助，不得成为跨机器身份的唯一载体 |
 | 每 target converted bytes + manifest | 发布派生物 | 由 schema 与 xlsx 重建；每份工件只含一个目标投影，运行时打开前必须校验 `(SchemaHash,ExportTargetId)` |
 | OperationReport/Diagnostic | 操作证据 | 记录结果与恢复信息，不成为数据或结构事实源 |
-| `ExcelDb.Project.json` | 唯一项目配置源 | 版本化；只持久化 `schemaDir`、`generatedDir`、`workbooks`、`bytesOutput` 与 `cacheDir`；报告根由 cache 推导，Git/VCS 配置与运行时 source opt-in 不进入本文件 |
+| `.exceldb/project.json` | 唯一项目配置源 | Project v2，版本化；只持久化 `formatVersion = 2`、`schemaDir`、`excelDir`、`generatedCSharpDir` 与 `generatedBytesDir`。后四项恰好对应用户可见的四类工件；target bytes、cache、报告、发布矩阵、Git/VCS 与运行时 source opt-in 均不得增加 Project 键 |
+| `.exceldb/published` | 已发布兼容历史 | 版本化机器工件；保存 M8 所需的已发布 descriptor/索引，不是当前 schema 的第二事实源 |
+| `.exceldb/plans|reports|recovery` | 隐藏操作状态 | 默认不进版本控制；只有显式高级/诊断入口或失败恢复链接才向用户暴露 |
 
 ## 4. 全局不变量与仲裁序
 
@@ -54,6 +57,7 @@ ExcelDB 不是普通的 Excel 读取库，而是以 Excel 为一等 authoring �
 由此派生的强制规则：
 
 - schema 生成、导入、保存、迁移、convert、切源和热载均采用“分析/计划 → 报告 → 提交或中止”；Blocker 必须零写入且不得替换旧运行时状态。
+- 项目内的领域写入和项目外 `generatedCSharpDir` 写入共享同一个带声明根的 MutationPlan。跨根提交必须做到全部成功或可恢复，失败立即回滚，进程中断后优先恢复；不得把跨磁盘操作描述成操作系统级瞬时原子可见。
 - 交互式结构创建与修改必须先形成候选 `.proto`，经同一 schema 编译与 lint 成功后才原子提交；失败保留原 `.proto` 与既有派生物，缓存或交互记录不得补充结构语义。
 - `client`/`server` 等 export target membership 是 proto 中的显式结构事实。`ITableInitializer` 与 `IExportTargetStrategy` 只可在 create/edit 计划构造期补未指定的简单字段/目标，确认后结果必须进入候选 proto；apply、build、check、convert 与 runtime 均不得重跑代码策略或把其注册状态当成第二事实源。
 - 纯 Excel 新增且 `__guid` 为空的行是 `pending-new`，只读扫描与 `check` 只能报告而不得补写；进入 `convert` 前必须由显式 `data prepare` 计划事务性固化 RowGuid。SaveAssets 可复用同一身份计划，任何 runtime source 都必须拒绝未固化身份。
@@ -74,7 +78,7 @@ Authoring / Editor ────────────────────�
 Host Adapters(Unity 等) + Integration Tools
 ```
 
-- Schema Tooling 可使用 protoc/descriptor 能力，但正式发布必须把锁定版本的 parser/compiler、descriptor 定义、`exceldb/options.proto`、最小 proto 发射资源、内置默认表初始化器与标准 client/server 导出目标策略封装进 self-contained CLI；普通 C# 扩展只在定制发行的 composition root 注册，不建设可配置的第二表模板/目标声明语言。在 PATH 清空、网络不可用且机器未安装 protoc/.NET SDK 时仍须完成 schema 创建、维护、编译与 codegen。执行期不得从 PATH 发现工具或联网下载依赖；非系统 import 必须是项目本地输入。这些工具期依赖不得进入 Core Runtime。
+- Schema Tooling 可使用 protoc/descriptor 能力，但正式发布必须把锁定版本的 parser/compiler、完整 `google/protobuf/*` 系统 proto 集、`exceldb/options.proto`、最小 proto 发射资源、内置默认表初始化器与标准 client/server 导出目标策略封装进 self-contained CLI；普通 C# 扩展只在定制发行的 composition root 注册，不建设可配置的第二表模板/目标声明语言。在 PATH 清空、网络不可用且机器未安装 protoc/.NET SDK 时仍须完成 schema 创建、维护、编译与 codegen。执行期不得从 PATH 发现工具或联网下载依赖；非系统 import 必须是项目本地输入。这些工具期依赖不得进入 Core Runtime。工具还须把同一 canonical 系统 proto catalog 镜像到 `Schema/exceldb` 与 `Schema/google/protobuf` 供编辑器解析；镜像不是 schema 输入、事实源或 hash 输入。
 - Core Runtime 拥有宿主无关的 descriptor 消费、运行时查询、source 抽象、identity、reference 与 ChangeSet 契约。
 - Authoring / Editor 依赖 Core，拥有 xlsx 导入、快照、合并、dirty、写回与结构生成。
 - Host Adapter 只能投影 Core/Authoring 能力；宿主类型不得反向进入二者。
@@ -87,14 +91,14 @@ Host Adapters(Unity 等) + Integration Tools
 
 | ID | Owner 文档 | 领域所有权 | 设计状态 | 实现状态 |
 | --- | --- | --- | --- | --- |
-| M1 | [`01-schema.md`](../modules/01-schema.md) | proto schema、descriptor、codegen 结构契约 | Dependency-Complete | Verified |
+| M1 | [`01-schema.md`](../modules/01-schema.md) | proto schema、descriptor、codegen 结构契约 | Dependency-Complete | Pending verification |
 | M2 | [`02-assetdatabase.md`](../modules/02-assetdatabase.md) | authoring facade 使用契约 | Dependency-Complete | Verified |
-| M3 | [`03-workflow.md`](../modules/03-workflow.md) | 角色、工件与端到端编排 | Dependency-Complete | Verified |
-| M4 | [`04-integration-tools.md`](../modules/04-integration-tools.md) | CLI/Unity/CI/VCS 工具投影 | Dependency-Complete | Verified |
+| M3 | [`03-workflow.md`](../modules/03-workflow.md) | 角色、工件与端到端编排 | Dependency-Complete | Pending verification |
+| M4 | [`04-integration-tools.md`](../modules/04-integration-tools.md) | CLI/Unity/CI/VCS 工具投影 | Dependency-Complete | Pending verification |
 | M5 | [`05-workbook-identity.md`](../modules/05-workbook-identity.md) | workbook、metadata、行身份、路径/token | Dependency-Complete | Verified |
 | M6 | [`06-import-edit.md`](../modules/06-import-edit.md) | 导入、快照、合并、dirty、写回、watcher | Dependency-Complete | Verified |
 | M7 | [`07-runtime.md`](../modules/07-runtime.md) | source、resident、运行时查询、热载、切源、ChangeSet | Dependency-Complete | Verified |
-| M8 | [`08-compatibility.md`](../modules/08-compatibility.md) | schema/workbook/bytes 兼容与迁移 | Dependency-Complete | Verified |
+| M8 | [`08-compatibility.md`](../modules/08-compatibility.md) | schema/workbook/bytes 兼容与迁移 | Dependency-Complete | Pending verification |
 
 依赖闭包：M1 + M5 是数据模型基础；M6 消费 M1/M5；M7 消费 M1/M5 的运行时投影；M8 约束 M1/M5/M6/M7 的跨版本演进；M2 投影 M5/M6/M7；M3 编排 M1/M2/M5-M8；M4 投影 M2/M3/M5-M8。
 
@@ -122,7 +126,7 @@ M1-M4 中仍存在的 `P§x` 是旧精简计划的迁移别名，不再指向归
 模块分别记录两个维度：
 
 - 设计：Proposed → Accepted Design → Dependency-Complete。
-- 交付：Not implemented → Implemented → Verified → Released。
+- 交付：Not implemented → Implemented → Pending verification → Verified → Released。
 
 “Accepted Design”只表示该模块自身方向被接受，不表示依赖已闭合或产品可用。只有 Dependency-Complete 且 Verified 的能力才能进入用户操作指南的“当前可用”路径。
 
@@ -144,11 +148,13 @@ M1-M4 中仍存在的 `P§x` 是旧精简计划的迁移别名，不再指向归
 | OD4 | `Missing`、`Defaulted`、显式 `Null`、显式 `Value` 与 `Invalid(raw)` 可区分；default 只在 effective read materialize，除显式 materialize operation 外不写回 | M1/M5/M6/M8 |
 | OD5 | ExcelDataSource 位于独立可选 Xlsx adapter；CLI/Editor/Development 可组合，Core/Runtime/Release 不依赖 xlsx | M5/M6/M7 |
 | OD6 | v1 不拆 hash；完整单一 SchemaHash 与正交 ExportTargetId 组成 runtime projection identity；artifact 可有内容 hash但不得替代兼容身份 | M1/M5/M7/M8 |
+| OD7 | Project v2 只投影四类用户工件：`Schema`、`Excel`、`Generated/CSharp`、`Generated/Bytes`；配置与工具状态收进 `.exceldb`，无参数交互入口改为 Project Hub。该裁决废止根部五键 `ExcelDb.Project.json`、`Schema/Generated/Data/Build/cache` 平铺布局、线性无参数向导及“非 client 必须手填输出路径” | M1/M3/M4/M8 |
+| OD8 | canonical 系统 proto 由 EXE 内唯一 catalog 拥有；磁盘镜像只解决编辑器 import 跳转，必须从业务 source-set、fingerprint、descriptor 与 SchemaHash 排除。项目外生成 C# 由多声明根、可恢复 MutationPlan v2 提交 | M1/M3/M4 |
 
 这些裁决由 owner 模块继续展开物理格式、事务和验收；后续若改变必须走新的版本化架构决策与兼容迁移，不得由实现静默漂移。
 
 ## 11. 非规范材料
 
 - 历史计划与旧裁剪记录：[`docs/archive/2026-07-authority-merge/`](../archive/2026-07-authority-merge/README.md)
-- 既有 Schema PoC 已删除；当前纯 C# 正式实现与自动化验收覆盖 M1–M8，PoC 不参与产品解释。
+- 既有 Schema PoC 已删除；当前纯 C# 正式实现正在按 Project v2 契约重验 M1/M3/M4/M8，PoC 不参与产品解释。
 - 实施与后续演进必须继续从本规范模块生成，不得由代码、样例或旧归档自行定义契约。
