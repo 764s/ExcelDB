@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Deterministic>true</Deterministic>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ExcelDB.Authoring\ExcelDB.Authoring.csproj" />
+    <ProjectReference Include="..\ExcelDB.Workbooks\ExcelDB.Workbooks.csproj" />
+    <ProjectReference Include="..\ExcelDB.Schema\ExcelDB.Schema.csproj" />
+    <ProjectReference Include="..\ExcelDB.Runtime\ExcelDB.Runtime.csproj" />
+  </ItemGroup>
+
+</Project>

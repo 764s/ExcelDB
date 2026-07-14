@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;netstandard2.1</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Deterministic>true</Deterministic>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>true</IsPackable>
+    <PackageId>ExcelDB.Runtime.Unity</PackageId>
+    <Version>0.1.0</Version>
+    <CopyLocalLockFileAssemblies Condition="'$(TargetFramework)' == 'netstandard2.1'">true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ExcelDB.Runtime\ExcelDB.Runtime.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="PackageTemplate\package.json" />
+    <None Update="PackageTemplate\Runtime\Bridge\ExcelDb.Runtime.Unity.Engine.asmdef" />
+  </ItemGroup>
+
+  <Target Name="BuildUnityPackage"
+          AfterTargets="Build"
+          Condition="'$(TargetFramework)' == 'netstandard2.1'">
+    <PropertyGroup>
+      <UnityPackageRoot>$(MSBuildProjectDirectory)\..\..\artifacts\upm\com.exceldb.runtime</UnityPackageRoot>
+      <UnityPluginRoot>$(UnityPackageRoot)\Runtime\Plugins</UnityPluginRoot>
+      <UnityBridgeRoot>$(UnityPackageRoot)\Runtime\Bridge</UnityBridgeRoot>
+    </PropertyGroup>
+    <ItemGroup>
+      <UnityManagedAssembly Include="$(TargetDir)*.dll" />
+      <UnityBridgeSource Include="Runtime\UnityRuntimeLoop.Unity.cs" />
+      <UnityBridgeSource Include="Runtime\UnityProfilerBackend.Unity.cs" />
+    </ItemGroup>
+    <RemoveDir Directories="$(UnityPackageRoot)" />
+    <MakeDir Directories="$(UnityPluginRoot);$(UnityBridgeRoot)" />
+    <Copy SourceFiles="@(UnityManagedAssembly)" DestinationFolder="$(UnityPluginRoot)" />
+    <Copy SourceFiles="@(UnityBridgeSource)" DestinationFolder="$(UnityBridgeRoot)" />
+    <Copy SourceFiles="PackageTemplate\package.json" DestinationFolder="$(UnityPackageRoot)" />
+    <Copy SourceFiles="PackageTemplate\Runtime\Bridge\ExcelDb.Runtime.Unity.Engine.asmdef"
+          DestinationFolder="$(UnityBridgeRoot)" />
+  </Target>
+
+</Project>

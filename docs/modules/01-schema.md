@@ -1,6 +1,6 @@
 # 模块 1:Schema 契约
 
-状态：Accepted Design。本文是 M1 Schema 领域的唯一 owner；跨模块权威规则、状态和开放决策见 [`docs/spec/README.md`](../spec/README.md)。声明方式 = `.proto` + exceldb options；`.proto` 可由程序直接编辑，也可由交互向导事务性维护，不要求手写；生成的 C# 类型是消费层投影，不是事实源。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M1 Schema 领域的唯一 owner；跨模块权威规则、状态和架构决策见 [`docs/spec/README.md`](../spec/README.md)。声明方式 = `.proto` + exceldb options；`.proto` 可由程序直接编辑，也可由交互向导事务性维护，不要求手写；生成的 C# 类型是消费层投影，不是事实源。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
 
 ## 1. 声明方式与身份规则
 
@@ -31,7 +31,7 @@ public interface ITableInitializer
 ```
 
 - `TableInitializationContext` 只暴露当前 proto source-set 编译得到的只读 schema 视图,以及已由入口收集并规范化的表名、key、简单字段和封闭选项；不暴露 workbook/C# 文件写入、Console/UI 或环境发现能力。
-- `ITableDraft` 只能配置本次正在创建的单表 draft:添加 M1§3 已有 singular Scalar/Enum 形状字段、指定 key,以及设置当前表/字段的现有 `TableOpts`/`FieldOpts`。它不得创建 sibling table、enum、message 或其他 schema 节点。initializer 不得写原始 proto 文本、直接分配最终数字身份、写 proto/C#/xlsx/cache,或生成/提交 MutationPlan。数字身份由后续 mutation engine 统一建议、避让、展示并确认。
+- `ITableDraft` 只能配置本次正在创建的单表 draft:添加 M1§3 已有 singular Scalar/Enum 形状字段、指定 key,以及设置当前表/字段除 legacy `export`/`export_targets` 外的现有 `TableOpts`/`FieldOpts`。导出选择由入口记录用户显式意图后统一交给 `IExportTargetStrategy`,initializer 不得预填或改写以让策略失效。draft 不得创建 sibling table、enum、message 或其他 schema 节点。initializer 不得写原始 proto 文本、直接分配最终数字身份、写 proto/C#/xlsx/cache,或生成/提交 MutationPlan。数字身份由后续 mutation engine 统一建议、避让、展示并确认。
 - 正式工具必须提供 `DefaultTableInitializer`,用简单字段与少量强类型选项产生有效 live ASSET 初始结构；自动补齐的字段/option 必须与手工输入一起进入候选 proto 与完整计划,未确认时零写入。
 - 定制 Schema Tooling 发行物可以在自身 composition root 以普通 C# 代码显式注册/替换当次活动的 `ITableInitializer`;`DefaultTableInitializer` 仍必须随包可用。initializer 是受信任代码,契约上必须无管线外副作用,不得依赖时间、随机数或未显式环境状态,并对同一 context 产生确定结果；异常或非法 draft 是 blocker,且不得绕过 lint、兼容分析或原子提交。
 - initializer 只参与新表 draft 构造,不参与冻结计划的 replay 或后续 schema consumer。每次计划构造可以因用户返回修改而重新调用,但同一 context 必须得到同一 draft。initializer `Id` 只用于计划构造期 Diagnostic/人读审计投影,不进 canonical MutationPlan、proto、Project、descriptor 或 schema_hash,也不是 plan revalidation 前置。提交后的唯一结构事实仍是 `.proto`。
@@ -55,7 +55,7 @@ import "google/protobuf/descriptor.proto";
 option csharp_namespace = "ExcelDb.Protocol";
 
 // ---- 值类型:字段可直接使用,类型即 value shape ----
-message RowRef           { int32 table = 1; int32 id = 2; }   // 内部引用;身份关系、cell token 与解析规则由 M5/M6 收口(总纲 OD1)
+message RowRef           { int32 table = 1; bytes row_guid = 2; } // 内部引用；row_guid 必须恰为 16 bytes 且非零
 message UnityResourceRef { string guid = 1; string main_asset_path = 2; }  // guid 为身份,path 为展示
 message LocalizedTextRef { string key = 1; }
 message Curve            { repeated CurvePoint points = 1; }
@@ -93,7 +93,7 @@ enum ExprResult {
 // legacy 单投影出包策略;仅作旧 proto 兼容输入,新声明使用 ExportTargetSet。
 enum ExportPolicy {
   EXPORT_DEFAULT = 0;           // 继承上级
-  EXPORT_ALL = 1;               // 固定映射到 {client,server},不自动包含未来 target
+  EXPORT_ALL = 1;               // 表级固定 {client,server};字段级继承父集,只随父集的显式变化而变化
   EDITOR_ONLY = 2;              // 映射到显式空 target 集
 }
 
@@ -189,7 +189,7 @@ public interface IExportTargetStrategy
 }
 ```
 
-- `StandardClientServerExportTargetStrategy` 是标准实现,只拥有稳定 target 目录 `client/server`、展示元数据与默认集 `{client,server}`。用户显式选择优先;策略只能为本次 create/edit 中尚未声明的表/字段填 target 集,不得改写已确认选择。
+- `StandardClientServerExportTargetStrategy` 是标准实现,只拥有稳定 target 目录 `client/server`、展示元数据与表默认集 `{client,server}`。用户显式选择优先；未指定表补该默认集,未指定字段复制当前父 effective set,不得一律写成 `{client,server}` 后扩大 client-only/server-only 父集。任何自定义策略同样只能为本次 create/edit 的未声明项填值,字段输出必须是父集子集,不得改写已确认选择。
 - 定制 Schema Tooling 可在 composition root 以普通 C# 注册策略(例如增加 `lite-client`)。策略必须确定、无 IO/时间/随机/环境依赖,不拥有 codegen、convert、路径或 runtime 语义。它的全部结果必须在 candidate proto 中显式物化并进入 MutationPlan;计划冻结/apply 及后续 schema consumer 都不再调用策略。
 - 策略 `Id` 只用于计划期 Diagnostic/人读审计,不进 canonical MutationPlan、proto、Project、descriptor 或 schema_hash。提交后删除/替换策略不得让已有表漂移;新 target 的持久事实是 proto 中的显式 id,不是策略注册状态。
 - 该接口不是通用 profile/policy 框架,也不引入 JSON/YAML 模板、任意参数袋、脚本/程序集扫描或 runtime 插件。如未来某 target 需要不同编码后端,必须另立 versioned backend 契约,不扩张本策略的字段归类职责。
@@ -372,9 +372,9 @@ schema_hash(xxHash64,对 canonical descriptor 字节流):
 - 进:live table/field/enum/variant 的 id 与 name、kind、shape、类型引用、key 结构、required/default/min/max/regex/unique、ref_table/ref_group/delete_policy、weighted/expression 描述、enum 值 number+name、每个表/字段物化并确定序的 effective export target 集、expand 物化结果、cell format 物化身份(join 分隔串栈 / named pair+kv / codec id+version,含 legacy 集合),以及每个 retired tombstone 的 id+原 message name+retired 状态。
 - 不进:display_name、header_comment、aliases、文件顺序、空白注释、protoc 与工具版本(记录在 descriptor 里,不入 hash)。
 - name 进 hash 的原因:字段名绑定 property path 与列路径,是消费语义;兼容分析(M8)按数字 id 判断 rename。
-- OD6 裁定前仍只有上述一个完整 `schema_hash`:所有 target 共享该 hash,并以 `(schema_hash, export_target_id)` 作为目标运行时投影身份。不先行发明 `export_view_hash` 或放宽原 hash 门禁;代价是任一 target 的结构变化会保守地要求全部 target 重建。
+- v1 只有上述一个完整 `schema_hash`:所有 target 共享该 hash,并以 `(schema_hash, export_target_id)` 作为目标运行时投影身份。不发明 `export_view_hash` 或放宽原 hash 门禁;代价是任一 target 的结构变化会保守地要求全部 target 重建。
 
-lint 规则(XDB0xx,blocker 即不产出 descriptor/codegen;作用域 = 项目 package 内的声明,不含 google/exceldb 系统 import——PoC 实证:否则 descriptor.proto 自身的枚举会误触 XDB013):
+lint 规则(XDB0xx,blocker 即不产出 descriptor/codegen;作用域 = 项目 package 内的声明,不含 google/exceldb 系统 import——回归验收必须证明系统 import 不会让 descriptor.proto 自身的枚举误触 XDB013):
 
 ```text
 XDB001 ASSET 表 id 缺失,或 live ASSET+retired 唯一域内重复/复用 tombstone
@@ -405,8 +405,8 @@ XDB020 export target id 非法/重复,显式 target 集与非默认 legacy expor
 5. target patcher:只对当前 target 可见字段做实例级 diff 与就地覆写(hot reload 用)。
 6. authoring 属性树元数据:SerializedProperty 路径表与数组/子表访问桩覆盖全量字段;runtime 不借此绕过 target 投影。
 7. 符号结构体:每个 symbols_type 按 target 实际运行时闭包生成 `struct`,`Expression<T>.Eval(in TSymbols)` 免装箱;仅 convert 所需的 authoring 输入不因此进入 bytes/读取面。
-8. target 不可变 `RuntimeSchemaRegistry`:每个 target 由生成代码提供具体实现/单例,`ExpectedSchemaHash` 编译为当前完整 `SchemaDescriptor.SchemaHash`,`ExportTargetId` 编译为当前稳定 target id;按 live table id 确定序固化该 target 的 table id → CLR type/factory/accessor/patcher 绑定。registry 没有运行时追加/替换 target 或 binding 的入口,作为 M7 `RuntimeDatabase.Open` 的不可省略代码期望输入。
-9. 内嵌身份常量:每个 target 生成类型、registry `ExpectedSchemaHash`/`ExportTargetId` 必须来自同一 candidate descriptor 与 target projection;运行期由 M7 把 registry 期望的 `(schema_hash,target_id)` 与 Excel/bytes source 硬比较。是否另增 target runtime hash 由总纲 OD6 裁决,裁决前均使用完整单 hash + target id。
+8. target 不可变 `RuntimeSchemaRegistry`:每个 target 由生成代码提供具体实现/单例,`ExpectedSchemaHash` 编译为当前完整 `SchemaDescriptor.SchemaHash`,`ExpectedExportTarget` 编译为当前稳定 `ExportTargetId`;按 live table id 确定序固化该 target 的 table id → CLR type/factory/accessor/patcher 绑定。registry 没有运行时追加/替换 target 或 binding 的入口,作为 M7 `RuntimeDatabase.Open` 的不可省略代码期望输入。
+9. 内嵌身份常量:每个 target 生成类型、registry `ExpectedSchemaHash`/`ExpectedExportTarget` 必须来自同一 candidate descriptor 与 target projection;运行期由 M7 把 registry 期望的 `(schema_hash,target_id)` 与 Excel/bytes source 硬比较。v1 固定使用完整单 hash + target id，不另增 target runtime hash。
 
 retired table 不产生任何 authoring/runtime 新类型、cell parser/writer、bytes accessor、patcher、属性树元数据或 registry binding,也不进入任何 target bytes table 集。空 target 集的 live 表仍产生 authoring surface,但不产生 target runtime surface。一次 codegen 必须按 candidate 的完整 authoring + target 输出清单原子替换派生物,禁止旧 target 类型或 binding 残留为幽灵读取面。
 
@@ -431,19 +431,19 @@ retired table 不产生任何 authoring/runtime 新类型、cell parser/writer�
 17. 离线自包含:仅把 self-contained CLI 发布物复制到空目录,清空 PATH、拒绝网络并确保无 protoc/.NET SDK；经结构化入口创建首个 proto、再修改字段,两次均能从内嵌 system import 产出 descriptor、C# 与 registry,且无进程查找或下载行为。项目本地 import 成功,缺失 import 只报本地错误。
 18. 表退役生命周期:previous published live ASSET → 保留同 message/id并设 retired,唯一合法转换成功;descriptor 从 Tables 的 live ASSET 集移入 RetiredTables且 hash 改变。断言 retired 无 workbook 要求、C# 类型、runtime registry binding 与 bytes table;table-id 建议同时避开 live/retired。新建即 retired、无 previous live、删除 tombstone、清标记、改 id及任意 id 复用分别命中 XDB019;当前集合重复另命中 XDB001。同 id retired rename 判兼容 rename且状态仍 retired。
 19. retired 确定性与历史 diff:含多个 live/retired 的 schema 在文件/枚举顺序变化、cache 删除/污染后重建出相同 Tables/RetiredTables、descriptor 字节与 hash;previous/current diff 能区分 live→retired、retired 保持、tombstone 消失/复活/复用。previous 变化不得改变由相同当前 proto 编译出的 candidate 字节,只改变转换 lint 结果。
-20. per-target generated registry/runtime surface:分别生成 client/server registry,反射断言二者不可变、无运行时 Register/Replace API,`ExpectedSchemaHash == SchemaDescriptor.SchemaHash`,`ExportTargetId` 分别正确,binding 按该 target 可见的 live table id 确定序且不含 retired。client-only/server-only/空集字段只出现在对应或任何 runtime surface 之外,不得经反射/侧表绕过；相同完整 hash 的 client/server 仍因 target id 不同而不可互换。分别污染/删除 descriptor cache、旧 target C# 与旧 registry 后运行 descriptor/codegen、layout、check/import、convert consumer,断言都重新观察 schemaDir 当前 proto并得到同一 hash/对应 target 绑定；过期 cache 不得让任何 consumer 接受旧 schema/target。
+20. per-target generated registry/runtime surface:分别生成 client/server registry,反射断言二者不可变、无运行时 Register/Replace API,`ExpectedSchemaHash == SchemaDescriptor.SchemaHash`,`ExpectedExportTarget` 分别为正确 `ExportTargetId`,binding 按该 target 可见的 live table id 确定序且不含 retired。client-only/server-only/空集字段只出现在对应或任何 runtime surface 之外,不得经反射/侧表绕过；相同完整 hash 的 client/server 仍因 target id 不同而不可互换。分别污染/删除 descriptor cache、旧 target C# 与旧 registry 后运行 descriptor/codegen、layout、check/import、convert consumer,断言都重新观察 schemaDir 当前 proto并得到同一 hash/对应 target 绑定；过期 cache 不得让任何 consumer 接受旧 schema/target。
 21. 表初始化器:内置 initializer 仅用表名、一个简单 key 与数个简单字段产生有效 live ASSET draft,自动字段/option 全部进候选 proto 与计划。注册一个简单 C# initializer 自动补一字段及 option,断言与直接产生同一 draft 时的 proto/descriptor/C# 逐字节等价。异常、重名字段、非标量 key 或其他非法输出均报 blocker 且零替换；提交后删除 initializer/会话/cache 仍能仅凭 proto 得到相同下游结果。
-22. 导出目标策略:标准策略只为 create/edit draft 中未指定项补 `{client,server}`,显式 client-only/server-only/空集选择不被覆盖；注册一个确定性 C# 策略补 `lite-client`,断言预览展示其全部 effective 集且确认后以显式 target id 写入 candidate proto。策略异常、输出非法/重复 id、扩大父集或破坏 key/ref target 闭包均报 blocker 且零替换；提交后删除/替换策略并清空会话/cache,build/codegen/check/convert 仍仅凭 proto 得到相同 descriptor/hash/target 产物,且策略 `Id` 不改变 canonical 结果。
+22. 导出目标策略:标准策略为未指定表补 `{client,server}`,为未指定字段复制父 effective set；显式 client-only 表下的未指定字段保持 client-only,字段显式 client-only/server-only/空集选择均不被覆盖。注册一个确定性 C# 策略补 `lite-client`,断言预览展示其全部 effective 集且确认后以显式 target id 写入 candidate proto。策略异常、输出非法/重复 id、扩大父集或破坏 key/ref target 闭包均报 blocker 且零替换；提交后删除/替换策略并清空会话/cache,build/codegen/check/convert 仍仅凭 proto 得到相同 descriptor/hash/target 产物,且策略 `Id` 不改变 canonical 结果。
 
 ## 8. 与仓库现状衔接
 
 - 旧实现(`ConfigDatabase`/`ExcelTableLoader`/SkillEditor 样例/旧测试/excels 样例数据)已于 2026-07-09 整体移除(D11);历史实现经 git 历史查阅,`UndoStack`/`DependencyGraph`/xlsx IO 需要时按件回捞参考。
-- `options.proto` v2 相对 v1(git 历史)的兼容姿态保持:`TableOptions` 沿用 50001 号位,50011-50015 reserved;`ExternalRef` 由 reference family 取代。
-- 现行实现衔接仅为 `poc/SchemaPoc` 所列子集(schema 编译 + C#/Excel 双生成 + 自检,见 `poc/README.md`),尚未满足 §1.1/1.2 的结构化 mutation/表退役、generated `RuntimeSchemaRegistry` 与 §5 的 self-contained 离线封装验收；正式工程必须遵守总纲 §5 的组件边界,proto parser/descriptor 依赖仅存在于 Schema Tooling,不得进入 Core Runtime。
+- 用于验证部分 schema 契约的旧 `poc/SchemaPoc` 已按用户要求于 2026-07-13 删除,不作为正式工程起点,也不从中迁移实现代码。
+- M1 正式工程与本模块自动化验收已落地：内嵌 schema 编译、canonical descriptor/hash、lint、codegen、初始化器与导出目标策略均由纯 C# 工程投影，并遵守总纲 §5 的组件边界。`options.proto` 保持相对 v1(git 历史)的兼容姿态:`TableOptions` 沿用 50001 号位,50011-50015 reserved,`ExternalRef` 由 reference family 取代；proto parser/descriptor 依赖仅存在于 Schema Tooling,不得进入 Core Runtime。
 
-## 9. 跨模块边界与开放决策
+## 9. 跨模块边界与架构决策
 
-- RowRef 的 cell token、`RowRef.id` 与行身份的关系 → M5/M6,并受总纲 OD1 约束。
+- RowRef canonical 身份固定为 `(table_id,row_guid)`；`row_guid` 为 16-byte 非零值。Excel 人读 token、key rename 修复与 bytes 编码由 M5/M6/M7 投影，但不得改变该身份。
 - 各 shape 的 cell 文法、表头三行布局、下拉与批注 → M5。
 - 导入校验时机与诊断码、key 索引 → M6。
 - bytes 布局与运行时访问器细节、`(SchemaHash,ExportTargetId)` source/session 门禁与换 target 生命周期 → M7。
@@ -621,3 +621,13 @@ retired table 不产生任何 authoring/runtime 新类型、cell parser/writer�
 **“前端/后端”不是会随枚举扩张而换义的二选一开关,而是字段所属的稳定 runtime target 集；`IExportTargetStrategy` 只在 create/edit 计划期帮助填写这组简单事实,确认后 proto 完整接管,所以未来增加 `lite-client` 只需普通 C# 扩展和显式 id,不会让历史字段或运行时重新分类。**
 
 落点:§2 `ExportTargetSet`/legacy 映射与 `IExportTargetStrategy`,§5 完整 hash + target identity,§6 每 target codegen,§7 第 12/20/22 条；转换、运行时与兼容发布边界分别由 M4/M7/M8 投影。
+
+---
+
+### D16(2026-07-13)删除已有实现,按模块计划推进
+
+> 删除已有实现, 按模块计划推进.
+
+**有限 PoC 不再承担正式实现的衔接职责；工作区回到规范驱动状态,后续实现从 M1 的模块验收开始逐项建立。**
+
+落点:§8 仓库现状衔接；总纲 M1 实现状态回到 Not implemented。

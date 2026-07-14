@@ -1,6 +1,6 @@
 # 模块 6:导入与编辑事务
 
-状态：**Provisional**。本文是 M6 导入与编辑事务领域的唯一 owner；跨模块权威规则、状态和开放决策见 [`docs/spec/README.md`](../spec/README.md)。本文固定状态变更串行发布、canonical 值作为跨阶段比较边界、写回只触碰计划内且由系统拥有的内容、提交前复读、失败保留旧事实与 dirty。本文不重复 M2 facade,不规定具体库、数据结构、算法、命令或 UI。若与其他规范模块冲突,视为规范缺陷并保持未定,不得选取任一侧静默实现。后续引用记作 M6§x。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M6 导入与编辑事务领域的唯一 owner；跨模块权威规则与架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文固定状态变更串行发布、canonical 值作为跨阶段比较边界、写回只触碰计划内且由系统拥有的内容、提交前复读、失败保留旧事实与 dirty。本文不重复 M2 facade,不规定具体库、数据结构、算法、命令或 UI。若与其他规范模块冲突,视为规范缺陷并显式修订，不得由实现静默选边。后续引用记作 M6§x。
 
 ## 1. 范围、依赖与核心不变量
 
@@ -54,7 +54,7 @@
 - “视图可发布”与“数据可写回/可转换”是两个不同判断。authoring 可以保留带数据诊断的可检查视图,但 error 或 schema drift 所要求的写回/转换门禁仍然生效。
 - 若读取、结构解释或身份绑定失败到无法形成自洽候选 view,导入不发布部分结果,保留旧 view 与旧 snapshot。
 - schema 身份不一致时允许按当前 descriptor 尽力绑定并完整报告 drift;在结构重新对齐前不得写回。具体兼容迁移归模块 8。
-- workbook 中未被当前 schema 拥有的列或 sheet 不参加 resident 物化,但必须作为持久内容保留;缺少 schema 所需列必须报告。缺失 cell、字段默认值与显式 null 的等价关系见 §9 开放决策。
+- workbook 中未被当前 schema 拥有的列或 sheet 不参加 resident 物化,但必须作为持久内容保留;缺少 schema 所需列必须报告。缺失 cell、字段默认值与显式 null 按 §9.1 的 canonical 状态真值表处理。
 - M5 身份扫描得到的 `pending-new` 行可以进入带诊断的 authoring view,但必须附 `identity.pending-new` error 并关闭 convert/runtime 门禁。check 投影同一诊断且保持只读；导入、watcher、check 与 convert 均不得顺手把候选 guid 写入 workbook。
 
 ### 2.2 导入发布的一致性
@@ -265,20 +265,16 @@ watcher 是变化提示器,不是第二条导入实现:
 | `DataPreparePlan` 指纹/行观察 stale | workbook/resident/dirty/snapshot 不变,候选不固化 | 丢弃旧计划,完整重扫后生成新计划 |
 | patch、复读或替换失败 | 原 workbook、dirty、snapshot 不变 | 消除失败原因后重试完整事务 |
 
-## 9. 开放决策(Provisional 阻塞项)
+## 9. 事务与值语义决策
 
-以下事项会改变数据语义或事务边界,本文不作默认选择:
-
-1. **canonical missing/default/null**:空 cell、缺列、缺尾段、显式 null、schema default 与语言默认值在导入、快照、merge、dirty 比较和写回中是否等价;需要单一真值表。
-2. **单行保存的影响闭包**:同一 workbook 的 `pending-new` 身份固化已由 §6.4 封闭并必须复用 `DataPreparePlan`,不再属于本开放项。请求保存一行时,由 key 改名、引用自动修复、delete policy 或其他 metadata 修复产生的关联变化是否自动纳入,以及跨 workbook 的事务边界仍未定。
-3. **多 workbook commit 边界**:跨书移动或引用闭包修改是逐 workbook 提交、全闭包提交,还是带 journal 的可恢复提交;在确定前不得宣称跨文件原子。
-4. **导入 error 的 resident 表示**:无法解析的 cell/行如何在可检查 authoring view 中承载,以及哪些索引/引用查询保持可用。
-5. **直接改 key 字段的归一**:视作 rename 并扩张影响计划,还是拒绝并要求结构化改名;必须与 Excel 外改和编辑器内改保持同义。
-6. **放弃、回滚与草稿恢复**:Dirty/Conflicted 的显式放弃基线,结构操作是否可逆,以及崩溃/domain reload 后是否有持久草稿或 journal。
-7. **事件发布顺序**:resident view、索引、snapshot、导入报告以及后续 Runtime ChangeSet 的可观察次序与重入政策。
-8. **commit journal**:workbook 已替换但本地 snapshot/状态更新失败时,是否以 journal 提供精确恢复,以及其生命周期。
-
-上述决策进入 Stable 前必须各自具备:状态真值表、失败分支、与 M2/M3/M4 的入口一致性说明及验收场景。
+1. **canonical missing/default/null 真值表**：物理 cell 不存在或空且无显式 token = `Missing`；schema 有 default 时 effective read 产生 `Defaulted(value)`，但 raw snapshot 仍记录 Missing；文本 `~` = 显式 `Null`，字符串字面量 `~` 必须写为 percent-escaped `%7E`；其他成功解析内容 = `Value`；解析失败 = `Invalid(raw)`。五态不相等。required 对 Missing/Null/Invalid 报错；没有显式 materialize operation 时 Defaulted 不写回。merge/dirty 先比较 raw canonical 状态，再由 validation 使用 effective view。
+2. **单行保存影响闭包**：`SaveAssetIfDirty` 的请求根是单行，但 planner 必须展开 key rename、RowRef token 修复、delete policy、metadata 与同事务 pending identity 的完整确定性影响闭包；报告逐项列出。闭包超出该 workbook 时进入 §9.3 多书事务，不能为保持“单行”而留下悬空引用。
+3. **多 workbook commit**：先对全部 workbook 复读/校验并在同卷 staging 产生候选与 backup，再写 versioned journal；逐文件替换后写 commit marker，最后复读全闭包并清理。中途失败按 journal 恢复全部旧文件；进程崩溃后启动时必须在任何导入前完成 rollback 或已提交候选验证。它是可恢复的全闭包事务，不宣称文件系统提供不可观察的多文件原子指令。
+4. **导入 error resident**：无法解析的 cell 以 `Invalid(raw)` 与定位诊断保留在 authoring view，整行仍可检查；该字段及依赖它的 key/ref/dependency binding 不进入有效索引，写回/convert 被门禁。此前已发布 runtime view 保持最后成功版本，不能把 raw 错值注入 runtime。
+5. **直接改 key**：与结构化 rename 同义；保留 AssetIdentity，检查项目域唯一性，展开所有人读 RowRef token 与 asset path 投影的影响闭包。无法完整修复时进入 conflict/blocker，不要求用户改用另一入口。
+6. **放弃、回滚与草稿**：显式 Discard 把 mine 恢复到最近成功 snapshot/theirs，并清对应 dirty/conflict；结构操作在 commit 前由同一内存 mutation 可逆。普通草稿不跨进程/domain reload 持久化，宿主必须先提示保存/放弃/取消；持久化工件只有 §9.3 commit journal，不能恢复未提交业务草稿。
+7. **发布顺序与重入**：owner publish point 串行执行 `resident values → indexes/dependencies → snapshot/base → last report → workbookImported → optional Runtime refresh/ChangeSet`。每一步看到同一 revision；事件回调中的写事务重入抛 `InvalidOperationException`，外部 watcher 信号只能排队到下一 publish point。
+8. **commit journal 生命周期**：journal 记录 format/version、transaction id、全部 old/new fingerprints、staging/backup 路径和阶段。创建后写穿；全部文件替换并复读成功前不推进 snapshot。commit marker 后派生状态失败时，下次以 workbook 新事实重建；无 marker 则回滚。恢复完成后才删除 staging/backup/journal，旧计划因 fingerprint stale 永久不可重放。
 
 ## 10. 模块验收基线
 
@@ -295,12 +291,12 @@ watcher 是变化提示器,不是第二条导入实现:
 11. DataPrepare 保真与发布:成功计划只改变目标 `__guid`,业务 canonical 值、行结构、公式、样式、metadata 与 `__rev` 不变；替换成功后才更新 snapshot/resident/index 并清 pending 诊断。
 12. DataPrepare stale/故障注入:形成计划后改变完整指纹、schema、行内容、位置或 guid cell,以及 patch/复读/替换各失败点,均断言原 workbook 与已发布状态不变、旧候选未固化。
 13. SaveAssets 复用:在两份相同基线 workbook 上复用同一个 `DataPreparePlan`,分别走独立 Clean 准备与 Dirty SaveAssets 组合,写入的候选 guid 完全相同；组合路径只有一个临时候选和一次 workbook 替换,业务 rev 只由业务变化推进。
-14. 开放决策防偷渡:§9 每项在未决期间均有测试或文档断言证明实现没有静默选定语义。
+14. §9 决策验收:五态 canonical 真值表、影响闭包、多书故障注入与 crash recovery、Invalid(raw) 索引隔离、直接 key rename、discard/domain reload、发布事件顺序/重入及 journal 生命周期均有确定性测试。
 
 ## 11. 与既有文档的衔接
 
 - 本文已经接管导入、快照、合并、dirty、写回和 watcher 调度契约；归档计划中的同类段落不再具有规范效力。
-- 具体工程、库、算法、数据结构、重试参数与示例属于未来非规范实施路线；不得反向改变本文不变量。
+- 具体工程、库、算法、数据结构、重试参数与示例属于非规范实现细节；当前实现及后续演进均不得反向改变本文不变量。
 - M3 的 WF3/WF4/WF5 消费本文事务;M4 的窗口、对话框与报告只是本文状态和报告的投影。
 - M5§9.2 已由 §6.4 落为 `DataPreparePlan`;M3/M4 后续只能增加该事务的入口投影,不得让 check/convert/watcher 形成隐式身份写入。
 - 本文不改变 M2 已公布的 facade 形状;§9 中影响到既有入口语义的决策完成后,应回写唯一权威文档,不得长期并存两说。

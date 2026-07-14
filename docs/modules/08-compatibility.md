@@ -1,6 +1,6 @@
 # 模块 8:兼容与迁移
 
-状态：**Provisional**。本文是 M8 兼容与迁移领域的唯一 owner；跨模块权威规则、状态和开放决策见 [`docs/spec/README.md`](../spec/README.md)。本文定义“schema 变化后如何保留数据并显式处理破坏操作”。身份与声明严格以 M1 为准:表 = `(exceldb.table).id`,字段 = proto field number,枚举值 = enum number,oneof variant = field number;`aliases`/`legacy` 是兼容输入,不是身份。归档 C# 特性方案及 `FormerName` 无规范效力。后续引用本文记作 M8§x。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M8 兼容与迁移领域的唯一 owner；跨模块权威规则与架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文定义“schema 变化后如何保留数据并显式处理破坏操作”。身份与声明严格以 M1 为准:表 = `(exceldb.table).id`,字段 = proto field number,枚举值 = enum number,oneof variant = field number;`aliases`/`legacy` 是兼容输入,不是身份。归档 C# 特性方案及 `FormerName` 无规范效力。后续引用本文记作 M8§x。
 
 ## 1. 范围与总则
 
@@ -56,8 +56,8 @@
 ### 3.2 Export target identity 与 legacy 等价
 
 - M1 物化后的 table/field export target 集合是 canonical descriptor 语义；兼容分析比较稳定 `ExportTargetId` 与每个数字 field identity 的 effective membership,不比较 UI 文案、策略实现类型或字段在选项中的书写顺序。`client`/`server` 是 export target,不是 M7 `RuntimeMode`。
-- runtime 工件身份暂为完整单一 `(SchemaHash, ExportTargetId)`。同一 SchemaHash 下不同 target 是不同 runtime projection,不能因 hash 相等互换；是否未来拆分 hash 仍只由 §12/总纲 OD6 裁定。
-- legacy `ExportPolicy` 先按固定等价规则规范化后再 diff:表级 `EXPORT_DEFAULT/EXPORT_ALL` 固定等价 `{client,server}`,字段级 `EXPORT_DEFAULT/EXPORT_ALL` 保持继承父集,`EDITOR_ONLY` 等价空 target 集。未来新增 target 不得扩大 legacy `EXPORT_ALL` 的含义。
+- runtime 工件身份固定为完整单一 `(SchemaHash, ExportTargetId)`。同一 SchemaHash 下不同 target 是不同 runtime projection,不能因 hash 相等互换。
+- legacy `ExportPolicy` 先按固定等价规则规范化后再 diff:表级 `EXPORT_DEFAULT/EXPORT_ALL` 固定等价 `{client,server}`,字段级 `EXPORT_DEFAULT/EXPORT_ALL` 保持继承父集,`EDITOR_ONLY` 等价空 target 集。未来新增 target 不得扩大表级 legacy `EXPORT_ALL`;字段级 ALL 只有在父集被显式加入该 target 时才随继承获得它。
 - 只把 legacy 写法改写为 effective target 集完全相同的显式声明属于 safe 语法迁移,不得制造 membership diff；canonical descriptor、SchemaHash、codegen 与各 target bytes 必须保持不变。新旧声明冲突或无法证明等价时不得猜测优先级,按 M1 lint blocker 处理。
 - `IExportTargetStrategy` 只在 authoring plan-time 把自动选择展开为候选 proto 中的显式 target 集；其 Id、实现类型或版本不是 compatibility identity。计划冻结后及 schema build/generate/check/convert/runtime 均不得重跑策略或用当前策略重新解释已提交字段。
 
@@ -139,9 +139,9 @@ membership 是同一 authoring field identity 的 runtime projection 集合,不�
 - schema删除字段不等于物理删除列。默认把旧列保留为 removed/deprecated辅助数据,不导入当前字段、不进converted bytes。
 - 从一个或全部 runtime target 移除字段也不等于 schema 删除或物理清理；字段仍属于 authoring schema,其 cell 与未移除 target 数据保持原位。只有 proto field 真正删除并 reserved 后才进入普通删除规则,物理清理仍须显式 purge。
 - 旧值不可解析时保存原始 cell,并提供定位诊断;不得用default/零值覆盖。
-- 新字段缺值/default的canonical读取结果沿用M6 OD1最终真值表;无论该决策如何,不得借结构刷新批量把default写入旧行,除非显式materialize operation。
+- 新字段缺值/default 的 canonical 读取结果沿用 M6§9.1 真值表：raw Missing 与 effective Defaulted 可区分；不得借结构刷新批量把 default 写入旧行,除非显式 materialize operation。
 - apply写临时文件,复读计划内canonical值与descriptor/metadata映射,成功后原子替换;失败保留原文件和dirty/migration状态。
-- 多 workbook引用、rekey或迁移形成同一语义闭包时,plan/gate必须先完整列出所有workbook;任一preflight blocker则零写入。跨workbook实际commit是全闭包原子、逐本提交还是journal恢复,仍归 M6§9 第 3 项,本文不提前裁定。
+- 多 workbook引用、rekey或迁移形成同一语义闭包时,plan/gate必须先完整列出所有workbook;任一preflight blocker则零写入。commit 使用 M6§9.3 的全闭包 staging+backup+journal 可恢复事务。
 
 ## 8. 显式破坏操作
 
@@ -177,7 +177,8 @@ membership 是同一 authoring field identity 的 runtime projection 集合,不�
 | editor import/check | mapping可确定;数据错误可定位 | 带诊断载入或read-only;CI drift为error |
 | SaveAssets | 无mapping blocker/未解兼容冲突 | dirty保留,零写入 |
 | normalize | legacy parse唯一且plan未stale | 歧义/错误cell保留 |
-| convert/build | 无error/blocker,迁移完成,schema匹配；本次 target 集的全部 registry/codegen/bytes/manifest 使用同一完整 SchemaHash 且各带正确 ExportTargetId | 失败,不产或不发布混合版本 target 工件 |
+| `convert(target)` | 请求 target 无error/blocker,迁移完成,schema匹配；该 target 的 registry/codegen 与新 bytes/manifest 使用同一完整 SchemaHash 且 target 正确 | 失败只保留该 target 旧工件,不触碰其他 target；单 target 成功不等于发布集合已闭合 |
+| publish/build/package | 本次发布集合的全部 target registry/codegen/bytes/manifest 均已 staging,使用同一完整 SchemaHash 且各带正确 ExportTargetId | 失败,不发布缺 target、旧 hash 或交叉 target 的混合版本工件 |
 | Runtime Open/Switch/Refresh | source `(SchemaHash,ExportTargetId)` 等于代码期望与 session 固定身份 | 失败并按M7保持 closed或保留旧source；换 target 只能 Close+Open |
 
 兼容分类与门禁只允许操作面收紧,不允许Unity菜单、CLI、CI或runtime各自发明更宽松解释。
@@ -203,9 +204,9 @@ membership 是同一 authoring field identity 的 runtime projection 集合,不�
 - 禁止把aliases/legacy当作永久双事实源;它们必须有清理证据和明确退出阶段。
 - 禁止删除已发布 table message/id、清除 retired 复活旧表，或把任一 live/retired table id 分配给新声明。
 
-## 12. 开放决策
+## 12. SchemaHash 决策
 
-1. **schema hash拆分**:M1当前完整单一`schema_hash`包含名称、类型/shape、全部 export target 声明及物化 membership、引用、format canonical+legacy等语义,排除display/comment/aliases。ExportTargetId 当前只是与该 hash 正交的 runtime 身份维度,工件/session 用 `(SchemaHash,ExportTargetId)` 区分 projection,不新增 target view hash。是否未来拆为 authoring/workbook/runtime semantic/layout/codegen hash仍未决定；裁定前所有工具和M7 source门禁继续只使用M1单 hash + 显式 target,不得先实现多hash或按 target 自算 view hash再让入口产生不同兼容结论。
+M1 v1 的完整单一 `schema_hash` 包含名称、类型/shape、全部 export target 声明及物化 membership、引用、format canonical+legacy 等语义，排除 display/comment/aliases。ExportTargetId 是与该 hash 正交的 runtime 身份维度，工件/session 用 `(SchemaHash,ExportTargetId)` 区分 projection，不新增 target view hash。artifact 的 source/content/codegen hash 只证明新鲜度，不得替代兼容 identity 或让不同入口产生不同兼容结论。
 
 ## 13. 模块验收
 
@@ -217,7 +218,7 @@ membership 是同一 authoring field identity 的 runtime projection 集合,不�
 6. format三阶段覆盖唯一成功、多成功同值、`format.ambiguous`、normalize零写入dry-run、跨workbook命中归零和安全删除。
 7. 不可解析值、unknown/helper/freeform、样式/公式/批注在generate/normalize/migration失败和成功路径均保留。
 8. purge、rekey、data-loss migration在plan stale、确认缺失、跨workbook任一blocker时均零写入,且 purge 永不删除 retired table tombstone。
-9. legacy export 等价:表 DEFAULT/ALL→`{client,server}`,字段 DEFAULT/ALL→继承父集,EDITOR_ONLY→空集；把 legacy 写法改为相同 effective target set 的显式声明,断言 descriptor、SchemaHash、codegen 与 client/server bytes 均不变。未来新增第三 target 时 legacy ALL 仍不自动包含它；冲突声明 lint blocker。
+9. legacy export 等价:表 DEFAULT/ALL→`{client,server}`,字段 DEFAULT/ALL→继承父集,EDITOR_ONLY→空集；把 legacy 写法改为相同 effective target set 的显式声明,断言 descriptor、SchemaHash、codegen 与 client/server bytes 均不变。未来新增第三 target 时表级 legacy ALL 不自动包含它,字段级 ALL 只随显式父集继承；冲突声明 lint blocker。
 10. target 发布闭包:加入、移除、移动 membership 后 field number 与 xlsx cell 不变,完整 SchemaHash 改变；client/server generated registry、codegen、bytes header、manifest 全部重建到同一新 hash且分别携带正确 target。任意混入旧 hash、错 target、只更新单侧移动结果均门禁失败且不发布混合工件。
 11. lint/generate/import/save/normalize/convert/runtime对同一compatibility输入得到一致或更严格门禁,无入口特例。M7 分别拒绝同 hash 错 target、同 target 错 hash及 Switch/Refresh 换 target,只有 Close+Open 可切换。
-12. schema hash拆分在未决状态下有防止实现自行放宽的测试/文档断言；断言当前不存在 target view hash,所有 runtime 身份均使用 `(SchemaHash,ExportTargetId)`。
+12. SchemaHash 决策门禁:断言不存在 target view hash,所有 runtime 身份均使用 `(SchemaHash,ExportTargetId)`；content/codegen hash 不得绕过此门禁。

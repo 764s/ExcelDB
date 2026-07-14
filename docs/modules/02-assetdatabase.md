@@ -1,6 +1,6 @@
 # 模块 2:AssetDatabase 门面(使用样例)
 
-状态：Accepted Design，尚未 Dependency-Complete。本文是 M2 AssetDatabase facade 的唯一 owner；其 workbook、导入编辑与运行时语义分别依赖 M5/M6/M7 收口。跨模块权威规则和开放决策见 [`docs/spec/README.md`](../spec/README.md)。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M2 AssetDatabase facade 的唯一 owner；其 workbook、导入编辑与运行时语义分别由 M5/M6/M7 提供闭合依赖。跨模块权威规则和架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
 
 ## 1. 范围、映射与失败形态
 
@@ -378,12 +378,12 @@ public readonly struct GUID { /* 128 位;TryParse / ToString(32 hex 小写)/ Emp
 
 - 本文是 AssetDatabase facade 的唯一 owner;归档计划中的旧签名清单与 Unity 对象基类模型均无规范效力。
 - 生成类型面为普通 C# 类(D4/Δ11):M1§3/§6 已同步;`AssetKey`/`AssetIdentity` 与 resident/missing 语义由 M7 收口。
-- 样例类型基底 = M1§4 proto 经 codegen 的 `Game.Configs`(poc 已生成同名类型 `SkillConfig.Damage`/`Common.Id`,见 `poc/SchemaPoc.GeneratedCheck/Generated/GameConfigs.g.cs`)。
-- 本模块当前仅有 Accepted Design,无完整代码交付;实现路线必须从本文生成,不得引用归档实施文档定义契约。
+- 样例类型基底 = M1§4 proto 经正式 codegen 产生的 `Game.Configs`;本文中的 `SkillConfig.Damage`/`Common.Id` 是契约调用示例,具体业务类型仍由使用者 schema 生成。
+- `ExcelDB.Authoring` 已交付挂载、导入/刷新、加载/查找、结构操作、保存、标签、依赖与冲突门面，并由 workbook/runtime adapter 与自动化测试验证；归档实施文档仍不得定义契约。
 
-## 11. 跨模块边界与开放决策
+## 11. 跨模块边界与架构决策
 
-- workbook 物理契约、metadata、RowRef token 与行身份关系 → M5(总纲 OD1 仍开放;纯 Excel 新行固化按 M5§9.2/M6§6.4)。
+- workbook 物理契约、metadata、RowRef token 与 `(table_id,row_guid)` 身份关系 → M5§6/§9.1；纯 Excel 新行固化按 M5§9.2/M6§6.4。
 - 导入、诊断、快照、SO/Undo/EditorUtility 与 key 直改归一 → M6。
 - POCO resident/missing 承载与 Play Mode 发布接线 → M7。
 - `FindAssets` 的 label/ref 反查索引与性能预算、`OpenAsset` 行定位属于 M2/M4/M7 契约的实现,不得由归档实施文档补充语义。

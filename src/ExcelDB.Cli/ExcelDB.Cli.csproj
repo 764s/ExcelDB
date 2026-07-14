@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Deterministic>true</Deterministic>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>exceldb</AssemblyName>
+    <RootNamespace>ExcelDb.Cli</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ExcelDB.Core\ExcelDB.Core.csproj" />
+    <ProjectReference Include="..\ExcelDB.Pipeline\ExcelDB.Pipeline.csproj" />
+    <ProjectReference Include="..\ExcelDB.Runtime\ExcelDB.Runtime.csproj" />
+    <ProjectReference Include="..\ExcelDB.Schema\ExcelDB.Schema.csproj" />
+    <ProjectReference Include="..\ExcelDB.Tooling\ExcelDB.Tooling.csproj" />
+    <ProjectReference Include="..\ExcelDB.Workbooks\ExcelDB.Workbooks.csproj" />
+  </ItemGroup>
+
+</Project>

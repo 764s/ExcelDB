@@ -1,6 +1,6 @@
 # 模块 3:工作流(端到端编排)
 
-状态：Accepted Design，尚未 Dependency-Complete。本文是 M3 角色、工件和端到端编排的唯一 owner，只回答“谁、何时、经哪个入口、失败后去哪”，不重定义 M1/M2/M5-M8 的领域机制。跨模块权威规则和开放决策见 [`docs/spec/README.md`](../spec/README.md)。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M3 角色、工件和端到端编排的唯一 owner，只回答“谁、何时、经哪个入口、失败后去哪”，不重定义 M1/M2/M5-M8 的领域机制。跨模块权威规则和架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
 
 ## 1. 范围、角色与工件
 
@@ -62,7 +62,7 @@ xlsx 数据 <──用户 Excel 直编                         <──SaveAssets
 
 1. 把当前平台的单文件 `exceldb` 可执行文件放入除它之外为空的目录并运行。未发现 `ExcelDb.Project.json` 时,交互入口把 cwd 作为候选 Project 根并询问确认;显式入口是 `init`,非交互参数形态归 M4。
 2. `init` 先展示完整计划,确认后一次建立可自洽的 Project 骨架:`ExcelDb.Project.json`、schemaDir 以及约定的 Schema/Generated/Data/Build/cache 目录。初始化不得要求预存 schema 程序集、外部构建工程或 SDK;任一写入失败都不得留下可被识别为成功 Project 的半成品。对已有合法 Project 重跑时只校验并补齐缺失的默认目录,其余为 no-op;只有不兼容同名工件才阻断。
-3. 进入 `table create`:用户选择具体 xlsx 路径,只给出表名、显式 key 或 M4 `AutoKey`、首批简单字段与少量封闭的自动选项；每个普通字段以“客户端/服务端”两个简单勾选表达初始导出意图,默认两者均选。M1 `ITableInitializer` 把结构输入展开为 table-local draft；M1 `IExportTargetStrategy` 只在 create plan 构造期为未显式指定 target 的字段补齐目标,标准实现 `StandardClientServerExportTargetStrategy` 补成 client+server。向导再按 M1 规则建议数字身份,并把所有手工/自动字段、effective defaults、effective targets、option 与数字身份在同一计划中交给用户确认。确认后必须把完整 target 结果显式写入 `.proto` 这一结构事实源,不得把策略代码或会话结果留成下游第二事实源；同一操作再完成 lint/codegen 与 workbook 结构生成,产出 `proto + 每 target C# runtime surface/registry 投影 + xlsx` 三件套,具体生成文件包装归 M1。路径不存在时直接创建含 metadata、行 1-3、下拉、`__exceldb_keys` 与伴随列的 workbook(P§5.1/5.2)。任一环节 blocker 均不得只留下其中一部分。
+3. 进入 `table create`:用户选择具体 xlsx 路径,只给出表名、显式 key 或 M4 `AutoKey`、首批简单字段与少量封闭的自动选项。每个普通字段的导出输入只有“自动/手动”两态:默认自动,界面预览标准策略将勾选客户端+服务端；用户切为手动后才以“客户端/服务端”两个简单勾选形成显式集合(允许两者全不选)。M1 `ITableInitializer` 把结构输入展开为 table-local draft且不拥有导出默认；M1 `IExportTargetStrategy` 只在 create plan 构造期为仍处于自动/未显式状态的项补齐目标,标准实现为未指定表补 client+server、为未指定字段复制父 effective set。向导再按 M1 规则建议数字身份,并把所有手工/自动字段、effective defaults、effective targets、option 与数字身份在同一计划中交给用户确认。确认后必须把完整 target 结果显式写入 `.proto` 这一结构事实源,不得把策略代码或会话结果留成下游第二事实源；同一操作再完成 lint/codegen 与 workbook 结构生成,产出 `proto + 每 target C# runtime surface/registry 投影 + xlsx` 三件套,具体生成文件包装归 M1。路径不存在时直接创建含 metadata、行 1-3、下拉、`__exceldb_keys` 与伴随列的 workbook(P§5.1/5.2)。任一环节 blocker 均不得只留下其中一部分。
 4. 初始结构需要调整时在阶段 2 转入 WF2 的 `table edit`,可重复直到结构确认;恢复已有 Project 时按事实选择动作:proto 存在但 descriptor/C# 陈旧则 `schema build`,xlsx 结构缺失或陈旧则 `generate`,不得盲目重跑 `table create`。之后用户打开 xlsx 填写数据并进入 WF3。Excel 中的任意手工列不会反向成为 schema;正式结构仍由向导更新 proto。
 5. 对已填写 workbook 显式执行 `data prepare`,把 `pending-new` 的候选 RowGuid 按已确认计划固化;随后执行只读 `check`,通过后执行默认 `client` 的 `convert`,产出 target 已明确记录、并与生成 C# client `RuntimeSchemaRegistry.ExpectedSchemaHash` 对应的 bytes + manifest。至此单文件工具的首次闭环完成；若 schema 同时存在 `server` 导出面,主引导只提示 M4 的显式 server convert 命令,不代替发布流程选择路径或生成第二 Project 配置。提交应入库的 Project/proto/生成代码/xlsx 形成首次基线;宿主编译生成 C# 并执行 Runtime `Open` 属于独立集成边界,不是主引导的完成条件。
 
@@ -70,7 +70,7 @@ xlsx 数据 <──用户 Excel 直编                         <──SaveAssets
 
 ## 4. WF2 表结构演进(`table edit`,程序主导)
 
-1. 启动 `table edit`,选择已有表并声明新增、重命名、删除、格式或字段 client/server 导出选择变化。向导读取当前 proto/descriptor 与 workbook,把用户意图和 M1 `IExportTargetStrategy` 只为未显式项补齐的 effective target 集一并写成显式 proto 变更:新增字段用新 number;改名保 number(身份不变即兼容,M1§1);字段删除、导出目标与其他字段语义变更走 M8§5 三阶段;已发布表的删除请求必须转换为 M8§3.1 的显式退役,保留原 message/id 并设置 `TableOpts.retired = true`;格式变更走 M1§2 三阶段。策略 `Id` 只进 plan 构造期审计,plan/apply 与后续 build/generate/check/convert 不再执行或依赖策略；向导维护 proto 不改变它的事实源地位,C# 与 Excel 表头都只是该结构的投影。
+1. 启动 `table edit`,选择已有表并声明新增、重命名、删除、格式或字段 client/server 导出选择变化。向导读取当前 proto/descriptor 与 workbook,把用户意图和 M1 `IExportTargetStrategy` 只为未显式项补齐的 effective target 集一并写成显式 proto 变更:新增字段用新 number;改名保 number(身份不变即兼容,M1§1);字段 target membership 变化保留原 number,按 M8§5.1 的加入 safe、移除/移动 warning 及配套发布规则处理,其他字段语义变更才走 M8§5 通用三阶段;已发布表的删除请求必须转换为 M8§3.1 的显式退役,保留原 message/id 并设置 `TableOpts.retired = true`;格式变更走 M1§2 三阶段。策略 `Id` 只进 plan 构造期审计,plan/apply 与后续 build/generate/check/convert 不再执行或依赖策略；向导维护 proto 不改变它的事实源地位,C# 与 Excel 表头都只是该结构的投影。
 2. 计划阶段同时列出 proto patch、将重新生成的 C# 文件和受影响 xlsx 动作,并运行 lint/兼容分析;未确认时零写入,blocker 时 Apply 不可用。每个兼容或格式迁移阶段是一轮 WF2,进入下一轮的证据 = 最近 check/normalize 报告命中归零。
 3. 确认后按一个提交单元更新 proto → descriptor/codegen → xlsx 结构;任一步失败都不得形成“proto 新、C# 或 xlsx 旧”的局部成功。底层结构生成仍遵守 generate 的分级动作与门禁(P§6.6);必要时再计划并应用 normalize。
 
@@ -163,7 +163,7 @@ exceldb diff [--schema-dir <dir>] <base.xlsx> <target.xlsx> [--json <path>]
 
 带"复用"标记的断言主体在既有测试面,本模块只加编排层剧本:
 
-1. 空目录首次闭环:测试目录只有当前平台单文件 exe → 无参数运行 → 完成“Project 初始化 → 创建或调整 Excel 表结构并生成 C# → 填写 Excel 并生成对应数据”三阶段。断言 Project/schemaDir 及约定目录可自洽,不依赖预存程序集、宿主工程、SDK、PATH 工具或网络。`table create` 指定不存在的 xlsx,只输入表名、`AutoKey`、简单字段及 client/server 勾选,预览时 initializer 自动字段/option、`StandardClientServerExportTargetStrategy` 为未显式项补出的 effective targets、M1 effective defaults 与数字身份均完整可见;确认后 target 集显式落 proto,一次得到 proto、每 target 生成 runtime surface/registry、C# 与 workbook,三者 SchemaHash/数字身份一致且 metadata/伴随列/下拉齐备。填写首行 → data prepare → check → 裸 convert,断言仅 `__guid` 被计划写入、业务值不变,只产生 target=`client` 的 bytes+manifest,其 schema_hash 等于 client generated registry 的 ExpectedSchemaHash；G1 仅提示而不执行 server convert。分别在 init、initializer、导出策略、lint、codegen、xlsx 提交点注入失败,断言无半初始化 Project 且三件套零局部替换;宿主编译 C# 后的 Runtime Open 冒烟归独立集成测试。
+1. 空目录首次闭环:测试目录只有当前平台单文件 exe → 无参数运行 → 完成“Project 初始化 → 创建或调整 Excel 表结构并生成 C# → 填写 Excel 并生成对应数据”三阶段。断言 Project/schemaDir 及约定目录可自洽,不依赖预存程序集、宿主工程、SDK、PATH 工具或网络。`table create` 指定不存在的 xlsx,只输入表名、`AutoKey`、简单字段及字段 target 的自动/手动选择；覆盖默认自动预览 client+server、手动 client-only、手动空集三例。预览时 initializer 自动字段/option、`StandardClientServerExportTargetStrategy` 为未显式项按父集补出的 effective targets、M1 effective defaults 与数字身份均完整可见;确认后 target 集显式落 proto,一次得到 proto、每 target 生成 runtime surface/registry、C# 与 workbook,三者 SchemaHash/数字身份一致且 metadata/伴随列/下拉齐备。填写首行 → data prepare → check → 裸 convert,断言仅 `__guid` 被计划写入、业务值不变,只产生 target=`client` 的 bytes+manifest,其 schema_hash 等于 client generated registry 的 ExpectedSchemaHash；G1 仅提示而不执行 server convert。分别在 init、initializer、导出策略、lint、codegen、xlsx 提交点注入失败,断言无半初始化 Project 且三件套零局部替换;宿主编译 C# 后的 Runtime Open 冒烟归独立集成测试。
 2. 演进剧本:`table edit` 对加字段 / rename(number 不变)/ 删字段 / 修改 client-server 勾选四例先只看计划,断言零写入且策略只补未显式 target;apply 后 effective target 完整落 proto,proto/C#/xlsx 同步且数据保留(P§12-6 复用)。删除策略/会话/cache 后从 proto 重建仍得到相同 target surfaces；构造"proto 新、xlsx 旧"仓库态 → CI check 以 schema.drift error 红。
 3. 新鲜度剧本:由向导或直接改 proto 后不重生成 → CI 新鲜度门禁红;重生成 → 绿。
 4. 调数剧本:Excel 改 cell/加行/复制行/改 key/删被引用行 → 身份与引用语义(P§12-3 复用;delete_policy 语义 M1§2)→ pending 时 check 只报错且零写入 → data prepare 计划固化身份 → check 绿后入库;计划前后任一指纹变化均以 stale 拒绝。
@@ -177,21 +177,21 @@ exceldb diff [--schema-dir <dir>] <base.xlsx> <target.xlsx> [--json <path>]
 
 ## 12. 与仓库现状衔接
 
-- 本模块仅文档,无代码交付(同 M2 惯例)。
+- M3 编排已由 Pipeline、CLI、OperationReport 与端到端自动化验收投影，覆盖初始化、schema、workbook、身份准备、检查、转换、diff 与失败恢复。
 - 权威迁移后,工作流与门禁语义由本文拥有;CLI/UI/CI/VCS 的具体投影只由 M4 拥有,归档计划与实施文档均不得补充第二种流程。
-- M4 已同步 self-contained 单文件交付、Project 自举配置、三阶段 G1、target-scoped convert 与 `init`/`table create`/`table edit`/`data prepare`;具体实现仍为 Not implemented,不因文档闭环提升交付状态。
+- M4 已实现 self-contained 单文件交付、Project 自举配置、三阶段 G1、target-scoped convert 与 `init`/`table create`/`table edit`/`data prepare`，并复用本文同一工作流与门禁。
 - M1 已同步“向导可事务性维护 proto”入口与导出目标策略边界,且 proto 的结构事实源地位不变;策略展开的 effective targets 必须显式落 proto,Excel 与生成 C# 仍只是数据事实源/结构投影,不得反向定义 schema。
 - 历史裁剪 ADR 第 19 条曾记录评审/对账工件恢复为单一 `diff` 命令；该记录现已归档,当前工具边界只以 M4 为准。
-- poc 无工作流对应物;WF 剧本的可执行化随 M6(导入与编辑)与 M7(运行时/adapter)的实现推进。
+- 旧 Schema PoC 已删除且不参与当前实现；WF 剧本已随 M6 导入/编辑与 M7 runtime/adapter 的正式工程形成可执行验收。
 
-## 13. 跨模块边界与开放决策
+## 13. 跨模块边界与架构决策
 
 - proto 数字身份、向导可执行的 schema patch、`IExportTargetStrategy` 及每 target runtime surface/registry 的 codegen 原子提交机制与物理包装 → M1;策略结果必须落 proto,C# 始终只是类型投影。
 - self-contained 单文件交付、空目录发现、`init`/`table create`/`table edit` 参数与 Project 可自举配置 → M4;M3 只规定步骤、完成态与失败恢复。
 - workbook 物理契约、metadata、RowRef token、`pending-new` 与身份计划可写边界 → M5。
 - 导入、DataPreparePlan 事务、诊断、ImportReport、SO/Undo/EditorUtility 与 diff 数据面 → M6。
 - resident 承载、Play Mode、发布点与 ChangeSet/workbookImported 次序 → M7 / Unity adapter。
-- 字段级三阶段兼容矩阵与 normalize 细则 → M8。
+- 字段语义三阶段、export target membership 特例兼容矩阵与 normalize 细则 → M8。
 
 ## 14. 决策记录
 

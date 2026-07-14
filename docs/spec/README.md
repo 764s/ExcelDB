@@ -59,8 +59,8 @@ ExcelDB 不是普通的 Excel 读取库，而是以 Excel 为一等 authoring �
 - 纯 Excel 新增且 `__guid` 为空的行是 `pending-new`，只读扫描与 `check` 只能报告而不得补写；进入 `convert` 前必须由显式 `data prepare` 计划事务性固化 RowGuid。SaveAssets 可复用同一身份计划，任何 runtime source 都必须拒绝未固化身份。
 - 已发布 ASSET 表的永久退役事实写在原 proto message 的 `TableOpts.retired = true`；message 与 table id 必须永久保留为 tombstone，live/retired id 均不得复用。retired 表不再生成或要求 active workbook 投影，也不进入生成代码的 live 类型/注册项或 runtime bytes；历史 sheet/数据仍按 M5/M8 默认保留，只能经显式 purge 删除。
 - authoring 写回只能修改声明拥有区与写回计划覆盖的内容；提交前必须复读验证，失败保留原文件与 dirty 状态。
-- canonical 值是导入、合并、diff 和写回之间的比较边界；其 missing/default/null 状态仍由开放决策 OD4 收口。
-- Runtime `Open` 必须显式取得生成代码提供的单 target `RuntimeSchemaRegistry`、source 与本次 options，并分别校验 source 声明、candidate 实读与 registry expected 的 SchemaHash 三者相等、ExportTargetId 三者相等；不得从 source、manifest、Project 或 cache 反推代码期望。OD6 裁定前只用完整单一 SchemaHash，runtime projection 身份为 `(SchemaHash,ExportTargetId)`。
+- canonical 值是导入、合并、diff 和写回之间的比较边界；物理 missing、schema default 物化、显式 null 与显式 value 是可区分状态。缺失值只有在读取 effective view 时才按 schema default 投影为 `Defaulted`，不得因此暗写 workbook。
+- Runtime `Open` 必须显式取得生成代码提供的单 target `RuntimeSchemaRegistry`、source 与本次 options，并分别校验 source 声明、candidate 实读与 registry expected 的 SchemaHash 三者相等、ExportTargetId 三者相等；不得从 source、manifest、Project 或 cache 反推代码期望。v1 固定使用完整单一 SchemaHash，runtime projection 身份为 `(SchemaHash,ExportTargetId)`。
 - 运行时发布采用单写者模型；对象图、索引、依赖图与 ChangeSet 在同一 publish point 原子可见。
 - 性能、确定性、写回保真和兼容性必须有可自动验证的门禁；具体工具与阈值属于实现/验证配置，不进入永久架构契约。
 
@@ -79,7 +79,7 @@ Host Adapters(Unity 等) + Integration Tools
 - Authoring / Editor 依赖 Core，拥有 xlsx 导入、快照、合并、dirty、写回与结构生成。
 - Host Adapter 只能投影 Core/Authoring 能力；宿主类型不得反向进入二者。
 - Integration Tools 只编排既有操作，不发明领域行为。
-- ExcelDataSource 的最终装配归属由 OD5 裁决；裁决前不得据此固化程序集依赖。
+- ExcelDataSource 由独立可选 Xlsx source/authoring adapter 装配；Core/Runtime 只拥有 source contract，Release runtime 不引用或链接 xlsx backend，CLI 与 Editor/Development composition root 可显式组合它。
 
 ## 6. 规范模块
 
@@ -87,14 +87,14 @@ Host Adapters(Unity 等) + Integration Tools
 
 | ID | Owner 文档 | 领域所有权 | 设计状态 | 实现状态 |
 | --- | --- | --- | --- | --- |
-| M1 | [`01-schema.md`](../modules/01-schema.md) | proto schema、descriptor、codegen 结构契约 | Accepted Design | PoC only |
-| M2 | [`02-assetdatabase.md`](../modules/02-assetdatabase.md) | authoring facade 使用契约 | Accepted Design；依赖 M5/M6/M7 收口 | Not implemented |
-| M3 | [`03-workflow.md`](../modules/03-workflow.md) | 角色、工件与端到端编排 | Accepted Design；依赖 M5-M8 收口 | Not implemented |
-| M4 | [`04-integration-tools.md`](../modules/04-integration-tools.md) | CLI/Unity/CI/VCS 工具投影 | Accepted Design；依赖 M5-M8 收口 | Not implemented |
-| M5 | [`05-workbook-identity.md`](../modules/05-workbook-identity.md) | workbook、metadata、行身份、路径/token | Provisional | Not implemented |
-| M6 | [`06-import-edit.md`](../modules/06-import-edit.md) | 导入、快照、合并、dirty、写回、watcher | Provisional | Not implemented |
-| M7 | [`07-runtime.md`](../modules/07-runtime.md) | source、resident、运行时查询、热载、切源、ChangeSet | Provisional | Not implemented |
-| M8 | [`08-compatibility.md`](../modules/08-compatibility.md) | schema/workbook/bytes 兼容与迁移 | Provisional | Not implemented |
+| M1 | [`01-schema.md`](../modules/01-schema.md) | proto schema、descriptor、codegen 结构契约 | Dependency-Complete | Implementation-in-progress |
+| M2 | [`02-assetdatabase.md`](../modules/02-assetdatabase.md) | authoring facade 使用契约 | Dependency-Complete | Implementation-in-progress |
+| M3 | [`03-workflow.md`](../modules/03-workflow.md) | 角色、工件与端到端编排 | Dependency-Complete | Implementation-in-progress |
+| M4 | [`04-integration-tools.md`](../modules/04-integration-tools.md) | CLI/Unity/CI/VCS 工具投影 | Dependency-Complete | Implementation-in-progress |
+| M5 | [`05-workbook-identity.md`](../modules/05-workbook-identity.md) | workbook、metadata、行身份、路径/token | Dependency-Complete | Implementation-in-progress |
+| M6 | [`06-import-edit.md`](../modules/06-import-edit.md) | 导入、快照、合并、dirty、写回、watcher | Dependency-Complete | Implementation-in-progress |
+| M7 | [`07-runtime.md`](../modules/07-runtime.md) | source、resident、运行时查询、热载、切源、ChangeSet | Dependency-Complete | Implementation-in-progress |
+| M8 | [`08-compatibility.md`](../modules/08-compatibility.md) | schema/workbook/bytes 兼容与迁移 | Dependency-Complete | Implementation-in-progress |
 
 依赖闭包：M1 + M5 是数据模型基础；M6 消费 M1/M5；M7 消费 M1/M5 的运行时投影；M8 约束 M1/M5/M6/M7 的跨版本演进；M2 投影 M5/M6/M7；M3 编排 M1/M2/M5-M8；M4 投影 M2/M3/M5-M8。
 
@@ -136,21 +136,19 @@ M1-M4 中仍存在的 `P§x` 是旧精简计划的迁移别名，不再指向归
 - 不以本地 cache、行号、key、sheet 名或路径作为最终资产身份。
 - 不把 export target 编码为 RuntimeMode，也不建设 target profile、JSON/YAML 声明或 runtime 动态归类插件。
 
-## 10. 开放架构决策
+## 10. 已裁决架构决策
 
-以下决策阻断 M5-M8 从 Provisional 升为 Accepted Design：
-
-| ID | 决策问题 | 影响模块 |
+| ID | v1 裁决 | 影响模块 |
 | --- | --- | --- |
-| OD1 | canonical `AssetIdentity`、RowGuid、M1 `RowRef` 与人读 key token 的关系 | M1/M2/M5/M6/M7 |
-| OD4 | canonical missing/default/null 是否为三个独立领域状态 | M1/M5/M6/M8 |
-| OD5 | ExcelDataSource 属于 Core、Authoring，还是独立可选 Xlsx adapter | M5/M6/M7 |
-| OD6 | 单一 schema hash 是否拆为 authoring/workbook hash 与 runtime/export hash | M1/M5/M7/M8 |
+| OD1 | canonical `AssetIdentity = (positive table_id, non-zero 128-bit RowGuid)`；RowRef 的 runtime/bytes 身份使用同一二元组，Excel 人读 token 只按当前 key 索引解析，key/path 不是 identity | M1/M2/M5/M6/M7 |
+| OD4 | `Missing`、`Defaulted`、显式 `Null`、显式 `Value` 与 `Invalid(raw)` 可区分；default 只在 effective read materialize，除显式 materialize operation 外不写回 | M1/M5/M6/M8 |
+| OD5 | ExcelDataSource 位于独立可选 Xlsx adapter；CLI/Editor/Development 可组合，Core/Runtime/Release 不依赖 xlsx | M5/M6/M7 |
+| OD6 | v1 不拆 hash；完整单一 SchemaHash 与正交 ExportTargetId 组成 runtime projection identity；artifact 可有内容 hash但不得替代兼容身份 | M1/M5/M7/M8 |
 
-开放决策不得由实施代码或旧归档文本先行决定。裁决后应先更新本文和 owner 模块，再进入实现。
+这些裁决由 owner 模块继续展开物理格式、事务和验收；后续若改变必须走新的版本化架构决策与兼容迁移，不得由实现静默漂移。
 
 ## 11. 非规范材料
 
 - 历史计划与旧裁剪记录：[`docs/archive/2026-07-authority-merge/`](../archive/2026-07-authority-merge/README.md)
-- PoC：`poc/`，仅证明其明确列出的子集，不代表完整产品实现。
-- 实施路线：当前旧版本已归档；新路线必须从本规范模块生成，不得自行定义契约。
+- 既有 Schema PoC 已删除；当前纯 C# 正式实现与自动化验收覆盖 M1–M8，PoC 不参与产品解释。
+- 实施与后续演进必须继续从本规范模块生成，不得由代码、样例或旧归档自行定义契约。

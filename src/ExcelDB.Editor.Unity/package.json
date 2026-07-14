@@ -1,0 +1,15 @@
+{
+  "name": "com.exceldb.editor",
+  "version": "0.1.0",
+  "displayName": "ExcelDB Editor",
+  "description": "Unity Editor projection for the ExcelDB project, authoring, plan and runtime APIs.",
+  "unity": "2022.3",
+  "keywords": [
+    "exceldb",
+    "editor",
+    "xlsx"
+  ],
+  "dependencies": {
+    "com.exceldb.runtime": "0.1.0"
+  }
+}

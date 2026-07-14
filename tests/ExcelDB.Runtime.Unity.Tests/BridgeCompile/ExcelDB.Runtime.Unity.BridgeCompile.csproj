@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>9.0</LangVersion>
+    <DefineConstants>UNITY_2022_3_OR_NEWER;UNITY_EDITOR</DefineConstants>
+    <Deterministic>true</Deterministic>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\ExcelDB.Runtime.Unity\ExcelDB.Runtime.Unity.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\..\src\ExcelDB.Runtime.Unity\Runtime\UnityRuntimeLoop.Unity.cs"
+             Link="Runtime\UnityRuntimeLoop.Unity.cs" />
+    <Compile Include="..\..\..\src\ExcelDB.Runtime.Unity\Runtime\UnityProfilerBackend.Unity.cs"
+             Link="Runtime\UnityProfilerBackend.Unity.cs" />
+  </ItemGroup>
+
+</Project>

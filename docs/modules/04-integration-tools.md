@@ -1,6 +1,6 @@
 # 模块 4:集成工具(场景 × 使用者)
 
-状态：Accepted Design，尚未 Dependency-Complete。本文是 M4 集成工具投影的唯一 owner，以场景 × 使用者矩阵作为设计覆盖契约；工具只投影 M2/M3/M5-M8 的机制，不发明领域行为。跨模块权威规则、实现状态和开放决策见 [`docs/spec/README.md`](../spec/README.md)。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M4 集成工具投影的唯一 owner，以场景 × 使用者矩阵作为设计覆盖契约；工具只投影 M2/M3/M5-M8 的机制，不发明领域行为。跨模块权威规则、实现状态和架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
 
 ## 1. 方法与覆盖度契约
 
@@ -112,7 +112,7 @@ Git baseline、difftool、pre-commit 与 PR 投影不属于 Project 键域;它�
 | C1 | `init [path]` | 幂等初始化/校验 Project 与默认目录;允许无 Project 执行 | MutationPlan(§3.4) | S1 |
 | C2 | `schema build` | 内嵌 M1 工具链:当前 proto → lint → canonical descriptor/cache → 为每个 effective export target 生成 C# runtime surface/registry | `--check`(C# 只比较不替换;descriptor cache 仍可重建) | S3,S5,S22 |
 | C3 | `table create [<TableName>]` | 收集简单字段/client-server 勾选/自动选项,经 M1 `ITableInitializer` 形成 draft,再由 `IExportTargetStrategy` 只补未显式 target 并把结果写进 candidate proto,最后建议/确认稳定身份;缺省写 `<schemaDir>/<TableName>.proto`,在同一计划复用 C2 编译与 C5 投影机制产 C#/xlsx | MutationPlan;`--workbook <path>` | S1,S10 |
-| C4 | `table edit [<table>]` | 字段/导出 target 三阶段变更或表退役;策略只补未显式 target,结果写 candidate proto；保留数字身份,在同一计划复用 C2/C5 机制同步 C#/xlsx | MutationPlan | S3,S10 |
+| C4 | `table edit [<table>]` | 字段语义三阶段变更、保 number 的 export target membership 变更(M8§5.1)或表退役;策略只补未显式 target,结果写 candidate proto；在同一计划复用 C2/C5 机制同步 C#/xlsx | MutationPlan | S3,S10 |
 | C5 | `generate` | 把已有 schema 结构投影/修复到 workbook,不改变业务数据 | MutationPlan;`--purge` `--rekey` `--workbook <path>` | S3,S5,S10 |
 | C6 | `normalize` | legacy cell 批量重写为 canonical(M1§2) | MutationPlan | S4 |
 | C7 | `check` | 只读导入级全量校验;除可重建 cache/显式报告外不写 proto/C#/xlsx/bytes,pending-new 只报 identity error | — | S1,S3-S5,S8 |
@@ -130,7 +130,7 @@ Git baseline、difftool、pre-commit 与 PR 投影不属于 Project 键域;它�
 
 #### C3 表初始化输入与扩展点
 
-`table create` 的默认交互只收集目标 workbook、表名、显式 key 或 `AutoKey`、零个或多个首批简单字段、每字段“客户端/服务端”两个勾选,以及少量封闭的强类型自动选项。本入口的“简单字段”固定为 M1§3 的 singular Scalar 或引用已有 Enum 形状;key 仍必须满足 M1 标量约束。v1 必备自动选项仅封闭为 `AutoKey`:当用户未给显式 key 时,确定性添加 `id:string` 并标为 key;与显式 key 同时给出是用法错误。新增任何内置自动选项必须先在本节登记强类型语义与验收,不得放开任意 key/value 选项袋。C3 固定创建 live ASSET,initializer 必须把 `kind=ASSET` 显式写入 candidate proto;`sheet_name=TableName` 是 M1 effective default,字段 export targets 则统一交给下述策略补齐/物化,不得成为 initializer 的第二默认规则。所有自动项、effective defaults、用户勾选与最终 effective targets 必须在确认前逐项可见;实际写入仍以 M1 canonical proto 规则为准。复杂 message/repeated/map/oneof/ref/codec、辅助类型定义与已有表演进/迁移不进首次建表表单或 initializer,只由 `table edit` 或直接编辑 proto 完成。
+`table create` 的默认交互只收集目标 workbook、表名、显式 key 或 `AutoKey`、零个或多个首批简单字段、每字段“自动/手动 + 客户端/服务端”选择,以及少量封闭的强类型自动选项。默认是自动,两个 target 勾选仅展示当前策略预览；切为手动后勾选状态才成为显式结构意图,且允许两者全不选。本入口的“简单字段”固定为 M1§3 的 singular Scalar 或引用已有 Enum 形状;key 仍必须满足 M1 标量约束。v1 必备自动选项仅封闭为 `AutoKey`:当用户未给显式 key 时,确定性添加 `id:string` 并标为 key;与显式 key 同时给出是用法错误。新增任何内置自动选项必须先在本节登记强类型语义与验收,不得放开任意 key/value 选项袋。C3 固定创建 live ASSET,initializer 必须把 `kind=ASSET` 显式写入 candidate proto;`sheet_name=TableName` 是 M1 effective default,字段 legacy `export`/`export_targets` 则不向 initializer 暴露写入口,统一由用户显式意图或下述策略补齐/物化。所有自动项、effective defaults、手工选择与最终 effective targets 必须在确认前逐项可见;实际写入仍以 M1 canonical proto 规则为准。复杂 message/repeated/map/oneof/ref/codec、辅助类型定义与已有表演进/迁移不进首次建表表单或 initializer,只由 `table edit` 或直接编辑 proto 完成。
 
 实现必须以 M1 `ITableInitializer` 抽象“简单输入/选项 → table-local draft”。默认实现是 `DefaultTableInitializer`;定制 Schema Tooling 发行物可以在自身 composition root 显式注册普通 C# 实现。initializer 不得拥有 UI/Console/文件选择语义,不得直接写 proto/C#/xlsx/cache、分配最终身份或提交计划;其 draft 仍由 M1 统一形成 candidate proto、lint/codegen,并由 C3 冻结为不可变 MutationPlan。异常或非法 draft 产生 blocker 且零领域写入。
 
@@ -139,7 +139,7 @@ initializer `Id` 只用于计划构造期 Diagnostic/人读审计投影;plan app
 
 #### C3/C4 字段导出目标与策略扩展点
 
-标准 UI 不要求用户输入 target id、掩码或任意声明片段；每个字段只显示 `客户端`、`服务端` 两个勾选,默认两者均选。显式勾选属于用户结构意图,策略不得覆盖；initializer 新增或用户选择“自动”而尚未显式给 target 的字段,由 M1 `IExportTargetStrategy` 在 C3/C4 plan 构造期补齐。标准发行物注册 `StandardClientServerExportTargetStrategy`,其标准结果是 client+server；key、引用闭包及无 target 等合法性仍由 M1 lint 裁决,工具层不发明例外。
+标准 UI 不要求用户输入 target id、掩码或任意声明片段；每个字段默认处于“自动”,同时只读预览当前父 effective set(首次默认表即 `客户端`、`服务端` 两个勾选均开)。切为“手动”后勾选才成为用户显式结构意图,策略不得覆盖；initializer 新增或仍为自动的字段由 M1 `IExportTargetStrategy` 在 C3/C4 plan 构造期补齐。标准发行物注册 `StandardClientServerExportTargetStrategy`:未指定表补 client+server,未指定字段复制父集；定制策略可让自动项预览/物化未来 `lite-client`,但字段不得扩大父集,手动标准 UI 仍只编辑 client/server。key、引用闭包及无 target 等合法性仍由 M1 lint 裁决,工具层不发明例外。
 
 策略输出必须在计划预览中按表/字段逐项展开,确认后完整写进 candidate proto。冻结的 MutationPlan 保存已解析 mutation,不保存“apply 时再运行策略”的 recipe；`--apply-plan`、提交后的 C2/C5-C8、cache 重建与 runtime 均不得加载或重跑策略。策略 `Id` 只进入计划构造期 Diagnostic/人读审计,不进入 plan replay 条件。直接编辑与策略产生相同 proto 时,下游 codegen/convert 必须相同。
 
@@ -426,7 +426,7 @@ exceldb convert --target server --out Build/Patch/server/config.bytes --json .ex
 CLI 与配方可自动化;窗口/对话框为手测清单(实施 §3-M5 惯例):
 
 1. 矩阵覆盖(文档评审断言):§2 每行至少一非空格、每格取值合法;§3-§6 每个工具条目被至少一格引用。
-2. CLI 解析:`init`/help/version 无 Project 合法,其他命令缺 Project → 3;`--project` 显式选择 / cwd 向上最近 Project;`--project` 与 init target 相对 cwd、其余路径相对 Project;`--schema-dir`/`--workbooks`/`--out` 覆盖对应字段,convert 缺 `--out` 用 `bytesOutput`;未登记的 schema glob override 必须拒绝。
+2. CLI 解析:`init`/help/version 无 Project 合法,其他命令缺 Project → 3;`--project` 显式选择 / cwd 向上最近 Project;`--project` 与 init target 相对 cwd、其余路径相对 Project;`--schema-dir`/`--workbooks`/`--out` 覆盖对应字段。裸 convert 与显式 client 缺 `--out` 才使用 `bytesOutput`;任何非 client target 缺 `--out` → 3 且零产物。未登记的 schema glob override 必须拒绝。
 3. 退出码矩阵:0/1/2/3 各至少一例;`--json` 报告可反序列化为 OperationReport。
 4. MutationPlan:C1/C3/C4/C5/C6/C10 的任一已生成计划 canonical 序列化稳定且 `planHash` 可复核;交互确认应用同一对象。`--dry-run --plan` 除计划外零写入;`--apply-plan` 成功逐项等价。分别篡改 plan body、Project、proto、workbook、目标不存在状态后 apply → stale blocker 2 且零领域写入;dry-run 不带 plan、apply-plan 混入意图参数均 → 3。
 5. normalize:legacy 命中重写与计数进入计划;只允许 plan apply,命中归零后 check 通过(M1§7-14 复用)。
@@ -449,16 +449,16 @@ CLI 与配方可自动化;窗口/对话框为手测清单(实施 §3-M5 惯例):
 
 ## 11. 与仓库现状衔接
 
-- 本模块仅文档,无代码交付。本次为覆盖度重写:结构改为矩阵驱动,初版工具规格全部保留(编号化为 C/U/I/V 条目);新增 U12/U13、I5 的 markdown 投影、✗2,均为既有机制/API 的投影(P§6.5-2、P§7.2、P§9),不产生机制修订。
+- 本模块的 C/G/I/V 投影已由纯 C# CLI、Editor 服务、Unity UPM 投影与 samples 交付；矩阵仍是实现覆盖度的权威索引，U/I/V 入口不增加领域语义。
 - 2026-07-11 增补 §7 场景命令样例(样例即规格,M2 D1 惯例延伸到命令面);原 §7-§12 顺移为 §8-§13。
 - 2026-07-11 早期的选项菜单与双层配置决策已归档;D9 只保留“线性 Project 主线”和“diff 归 Git”的结论,阶段数由 D10 后续收敛为三阶段。
 - 2026-07-11 D9:Project 成为唯一配置源;早期第二配置层和相关选择参数撤销,主引导改称 G1,第一阶段改为 Project 初始化。
 - 2026-07-11 D10:产品入口改为可复制的 self-contained 单文件;G1 从空目录经三阶段闭环到 C#/xlsx/bytes,补 C1/C3/C4/C10,统一 MutationPlan,并把外部 schema build 依赖收回内嵌 C2。
 - 权威合并后,CLI/Unity/CI/VCS 的工具契约只由本文拥有；归档计划中的命令、菜单和流水线不再参与解释。
-- samples 增补(非契约):CI yaml 样例、pre-commit 与 difftool 配置脚本、diff json→markdown 投影脚本。
-- poc 仅证明 schema 编译与 C#/Excel 双生成子集;不证明单文件分发、init/table 事务或完整 G1 已实现。
+- samples 已交付(非契约):CI yaml 样例、pre-commit 与 difftool 配置脚本、diff json→markdown 投影脚本。
+- 旧 Schema PoC 已按用户要求删除；当前单文件分发、init/table 事务、完整 G1 与 Unity Editor UPM 已实现。Unity 投影通过 C# 9 编译、UPM 结构与 Unity API stub 自动门禁，但尚不宣称已在真实 Unity 2022.3 宿主执行；接入目标工程时仍需宿主 smoke test。
 
-## 12. 跨模块边界与开放决策
+## 12. 跨模块边界与架构决策
 
 - workbook 物理契约(下拉、批注、metadata sheet)的生成细节 → 模块 5(workbook 与身份)。
 - `schemaDir` 下 proto source-set/import-root、内嵌编译确定性、descriptor cache fingerprint 与 C# 产物结构 → M1;M4 只拥有五键、命令与路径投影。
@@ -488,7 +488,7 @@ CLI 与配方可自动化;窗口/对话框为手测清单(实施 §3-M5 惯例):
 
 **`ExcelDb.Project.json` 是工具配置的唯一事实源:CLI 参数是覆盖不是平行来源,Settings UI 是文件投影不是副本;解析顺序(显式 > json)必须是规格常量——否则两个入口对同一仓库跑出不同结果,入口等价(M3§2)从根上破产。**
 
-落点:§3 公共参数与解析顺序(P§10 修订)、U11;convert `--out` 缺省 = json `bytesOutput`。
+落点:§3 公共参数与解析顺序(P§10 修订)、U11;仅 client convert 的 `--out` 缺省 = json `bytesOutput`,非 client 必须显式给出路径。
 
 ---
 
@@ -568,3 +568,13 @@ CLI 与配方可自动化;窗口/对话框为手测清单(实施 §3-M5 惯例):
 **首次建表界面只承载简单结构意图;约定字段与 option 由可替换的 `ITableInitializer` 在代码中确定性补齐,随后仍走同一 candidate-proto/MutationPlan 管线。该扩展点是 C3 的 C# composition seam,不是模板 DSL、Project 配置、G1 插件或第二 schema 事实源。**
 
 落点:§3.1 首次输入,§3.2 配置非目标,§3.3 C3 扩展点,§3.4 plan 冻结边界,§3.6 定制发行,§9 ✗10,§10 第 21 条;M1 D14 拥有 initializer/draft 机制。
+
+---
+
+### D12(2026-07-12)每次转换只产一个显式 export target
+
+> 另外允许表的字段声明为，服务端导出和客户端导出， 这一块也建议抽象为借口策略， 暂时这个策略仅关心前后端， 未来可能有简易前端之类的
+
+**标准界面把 client/server 收敛为两个简单勾选,代码策略只在 create/edit 计划期补未指定项；持久事实仍是 proto 的开放 target id 集。转换命令一次只产一个 target,裸调用固定为 client,因此 server 与未来 `lite-client` 无需扩张 Project 五键或引入 profile/多目标隐式发布。**
+
+落点:§3.2 五键边界、§3.3 C3/C4/C8、§3.5 单 target 参数规则、§3.6 C# 策略装配、§7/§10 多目标验收；canonical target 与策略接口归 M1,发布兼容归 M8。

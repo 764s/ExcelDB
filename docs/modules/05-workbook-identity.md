@@ -1,8 +1,8 @@
 # 模块 5:Workbook 物理契约与行锚
 
-状态：**Provisional**。本文是 M5 Workbook/Identity 领域的唯一 owner，消费 M1 的 proto/数字结构身份与 M2 的 asset path/GUID 门面语义。跨模块权威规则、状态和开放决策见 [`docs/spec/README.md`](../spec/README.md)。本文只固定 workbook 区域所有权、三行表头、metadata、row guid/rev、key/path 的定位角色、身份扫描规则与写回保真边界。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M5 Workbook/Identity 领域的唯一 owner，消费 M1 的 proto/数字结构身份与 M2 的 asset path/GUID 门面语义。跨模块权威规则与架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文固定 workbook 区域所有权、三行表头、metadata、row guid/rev、key/path 的定位角色、身份扫描规则与写回保真边界。
 
-归档计划中的 C# 特性、`FormerName`、`Object`/`ScriptableObject` 基类或名字身份均无规范效力。纯 Excel 新行的身份固化与退役 table id 的 proto tombstone 已分别由 §9.2/§9.3 裁决；仅 `AssetIdentity`/`RowRef` 的最终表示仍在 §9.1 开放,相关下游契约不得替它选择方案。
+归档计划中的 C# 特性、`FormerName`、`Object`/`ScriptableObject` 基类或名字身份均无规范效力。纯 Excel 新行的身份固化、退役 table id 的 proto tombstone 与 `AssetIdentity`/`RowRef` 表示分别由 §9.2/§9.3/§9.1 裁决。
 
 ## 1. 职责与依赖方向
 
@@ -53,7 +53,7 @@ M6 import/edit      M7 convert/runtime      M8 compatibility
 - schema 不能从表头或 metadata 反推；两者不能创建 schema 中不存在的结构事实。
 - key、asset path、sheet 名、行号或列号变化，不得单独解释为行身份变化。
 - row guid 随 Excel 排序、剪切和跨 sheet 的受控移动跟随该行；row rev 不参与相等性判断。
-- M2 暴露的编辑期 `GUID` 当前投影为 ASSET 行的 row guid；这不提前裁定 §9.1 的统一 `AssetIdentity`/`RowRef` 内部表示。
+- M2 暴露的编辑期 `GUID` 投影为 ASSET 行的 row guid；完整 canonical identity 仍必须同时携带 table id。
 
 ## 3. Workbook 与 sheet 所有权
 
@@ -159,7 +159,7 @@ __rev   u32 行内容修订号
 - ASSET 的 asset path 沿用 M2§2，只作为加载、查找、日志和工具持久化之外的展示定位。需要跨 rename/move 持久保存的工具状态不得只存 path。
 - 同一 row guid 的 key 变化是 rename 候选；是否有效仍需模块 6 检查 key 唯一域、数据有效性和保存门禁。
 - workbook 移动、表/字段 rename、sheet 调整或行排序可以改变 path/位置，但不得据此生成新的 row guid。
-- 本文不新增 key token 或 path 转义规则；M2 的门面文法与 §9.1 的 RowRef 表示裁决完成后，由模块 6 固化 parse/write 细节。
+- RowRef 的 Excel 人读 token 固定为 `<table-id>:<escaped-key-components>`；table id 使用十进制，key component 使用 UTF-8 percent-encoding，复合 key 以未转义 `|` 分隔。导入先按 table id 限域，再按当前 key 索引解析为 `(table_id,row_guid)`；写回由当前 key 重建 token。key rename 必须在同一影响计划内修复 token，token 本身不是 identity。
 
 ## 7. 身份扫描
 
@@ -228,23 +228,15 @@ mount、check、diff 和 dry-run 可以更新明确标为本地缓存的快照/�
 
 存在任一 `pending-new` 时,convert 必须以 blocker 拒绝且不得隐式执行本计划；runtime source 同样不得接收未固化身份。操作者必须先经获授权入口显式提交 `DataPreparePlan`（或提交复用它的 SaveAssets 事务）,再重新 check/convert。
 
-## 9. 身份决策状态(仅 OD1 仍开放)
+## 9. 身份决策
 
-### 9.1 OD1:统一 `AssetIdentity` 与 `RowRef` 表示
+### 9.1 OD1:统一 `AssetIdentity` 与 `RowRef` 表示(已裁决)
 
-已接受事实:
-
-- M1 的表身份是稳定数字 table id。
-- workbook 的 `__guid` 是行机器锚；M2 的编辑期 `GUID` 投影到 ASSET row guid。
-- key/path 可变且只负责业务定位。
-
-尚未裁定:
-
-- canonical `AssetIdentity` 是否为 `(table_id,row_guid)`、仅 row guid，或包含另一种稳定 row id。
-- M1 `RowRef { table, id }` 中 `id` 与 row guid、表内数字 id 的关系，以及 Excel token、descriptor、bytes 三种表示如何往返。
-- 子表元素锚、ASSET 身份与运行时 handle 的边界。
-
-阻断:模块 6 的引用解析/rename 修复/delete policy，模块 7 的 bytes 引用与跨源 join，以及模块 8 的身份兼容矩阵不得在本决策前定稿。
+1. canonical `AssetIdentity` 固定为 `(positive table_id, non-zero 128-bit row_guid)`。table id 来自 M1，row guid 来自 ASSET 行 `__guid`；二者共同参与相等与排序。项目挂载域仍要求 row guid 全局唯一，以保持 M2 `GUID → path` 无歧义；重复值是 blocker，不靠表或物理顺序降级消歧。
+2. M1 `RowRef { table, row_guid }`、authoring canonical 值与 converted bytes 均承载同一二元组；protobuf `row_guid` 恰为 16 bytes，xlsx canonical 文本仍为 32 个小写十六进制字符。全零、错误长度或未知 table id 均无效。
+3. Excel cell 使用 §6 的人读 key token；导入必须在当前索引中唯一解析后才得到 canonical RowRef。token/key/path 改变不改变 identity；rename 写回修复 token，无法唯一解析产生 `ref.unresolved`，不得用历史名称或相似度猜测。
+4. 子表 row guid 只锚定所属父资产内的元素，其 canonical element identity 为 `(parent AssetIdentity, numeric field-id path, element row_guid)`，不构成独立 AssetIdentity，也不能成为外部 RowRef 目标。
+5. M7 `AssetKey` 是含 generation 的 session-local handle，仅加速定位上述 AssetIdentity；它不进入 xlsx、descriptor、bytes identity 或持久工具状态。
 
 ### 9.2 OD2:纯 Excel 新行的身份固化(已裁决)
 
@@ -284,4 +276,4 @@ mount、check、diff 和 dry-run 可以更新明确标为本地缓存的快照/�
 9. 门禁与复用:存在 pending 时 convert/runtime 拒绝；固化并重新 check 后放行。在两份相同基线 workbook 上复用同一个 `DataPreparePlan`,独立准备与 SaveAssets 组合写入完全相同的 row guid,且各自只做一次 workbook 原子替换。
 10. retired 物理边界:当前 descriptor 的 retired 表无 sheet 时 check/generate 不报缺失且不创建；历史 sheet 存在时报告 `table.retired-present`,其 metadata、业务值、样式与非拥有内容经 generate/save/DataPrepare 后逐项不变,且不进入 live 导入/convert/runtime 数据集。
 11. tombstone 身份:同一已发布 proto message 从 live 改为 `retired = true` 后保留原 table id；live+retired id 同域唯一。删除 message、另一 message 复用 id、或 retired 历史 sheet/同名 message 被当作 live 复活,均消费 M1/M8 blocker/兼容结论并断言 M5 不产生合法身份猜测或 workbook 写入。
-12. 开放决策门禁:测试不得把 §9.1 的任一候选方案编码为既定契约；相关下游测试标记为待决而非自行假设。
+12. 身份跨面一致:同一 `(table_id,row_guid)` 在 xlsx token 解析、authoring snapshot、converted bytes 与 runtime join 中一致；全局重复 row guid、错误长度/全零 RowRef、歧义 token 与把子表锚当资产均为 blocker。

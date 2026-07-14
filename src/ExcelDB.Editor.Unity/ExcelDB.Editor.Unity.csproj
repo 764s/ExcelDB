@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>9.0</LangVersion>
+    <DefineConstants>$(DefineConstants);EXCELDB_DOTNET_VALIDATE</DefineConstants>
+    <Deterministic>true</Deterministic>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+    <PackageId>ExcelDB.Editor.Unity</PackageId>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Update="package.json" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="upm\" />
+    <None Update="Editor\ExcelDb.Editor.Unity.asmdef" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="upm\Editor\ExcelDb.Editor.Unity.asmdef" />
+    <None Include="Editor\**\*.cs" Pack="true" PackagePath="upm\Editor\%(RecursiveDir)%(Filename)%(Extension)" Visible="false" />
+  </ItemGroup>
+
+  <Target Name="BuildUnityPackage" AfterTargets="Build">
+    <PropertyGroup>
+      <UnityPackageRoot>$(MSBuildProjectDirectory)\..\..\artifacts\upm\com.exceldb.editor</UnityPackageRoot>
+      <UnityEditorRoot>$(UnityPackageRoot)\Editor</UnityEditorRoot>
+    </PropertyGroup>
+    <ItemGroup>
+      <UnityEditorSource Include="Editor\**\*.cs" />
+    </ItemGroup>
+    <RemoveDir Directories="$(UnityPackageRoot)" />
+    <MakeDir Directories="$(UnityEditorRoot)" />
+    <Copy SourceFiles="package.json" DestinationFolder="$(UnityPackageRoot)" />
+    <Copy SourceFiles="Editor\ExcelDb.Editor.Unity.asmdef" DestinationFolder="$(UnityEditorRoot)" />
+    <Copy SourceFiles="@(UnityEditorSource)"
+          DestinationFiles="@(UnityEditorSource->'$(UnityEditorRoot)\%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
+</Project>

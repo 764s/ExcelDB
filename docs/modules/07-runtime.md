@@ -1,6 +1,6 @@
 # 模块 7:运行时
 
-状态：**Provisional**。本文是 M7 运行时领域的唯一 owner；跨模块权威规则、状态和开放决策见 [`docs/spec/README.md`](../spec/README.md)。本文定义宿主无关运行时的最小权威契约。归档计划中的 `Object`/`ScriptableObject` 基类无规范效力；M1 生成的普通 C# 类是数据投影,资产身份、resident/missing 状态和 source 归属由运行时注册表承载。后续引用本文记作 M7§x。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M7 运行时领域的唯一 owner；跨模块权威规则与架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文定义宿主无关运行时的最小权威契约。归档计划中的 `Object`/`ScriptableObject` 基类无规范效力；M1 生成的普通 C# 类是数据投影,资产身份、resident/missing 状态和 source 归属由运行时注册表承载。后续引用本文记作 M7§x。
 
 ## 1. 范围与硬边界
 
@@ -13,17 +13,17 @@
 ## 2. 身份、handle 与 resident 状态
 
 ```csharp
-public readonly struct AssetIdentity { /* opaque;物理表示待身份模块裁定 */ }
+public readonly struct AssetIdentity { /* positive table id + non-zero 128-bit RowGuid */ }
 public readonly struct AssetKey      { /* session-local table/slot/generation */ }
 
 public enum RuntimeAssetState : byte { Resident, Missing }
 ```
 
-- `AssetIdentity` 是跨 Excel/bytes source 稳定的 opaque 资产身份;具体物理表示归 M5 OD1,本模块不得把它提前收窄为 row guid、`(table_id,row_guid)` 或其他组合。key、路径、行号不是 identity。
+- `AssetIdentity` 是跨 Excel/bytes source 稳定的 `(table_id,row_guid)` 资产身份；table id 是 M1 stable id，row guid 是 M5 非零 128-bit 行锚。key、路径、行号不是 identity。
 - `AssetKey` 是当前 RuntimeDatabase session 内的热路径 handle,含 generation 防止行槽复用后旧 handle 命中新资产。切源成功后能继续解析的旧 handle 必须仍指同一 `AssetIdentity`;不能证明时判失效,禁止误命中。
 - 每个 `(AssetIdentity,生成类型)` 在一个 session 中至多一个 canonical resident 实例。重复加载与内部引用解析返回同一实例。
 - 每个 session 绑定且只绑定一次由当前生成代码提供的 `RuntimeSchemaRegistry`;registry 的 expected `(SchemaHash, ExportTargetId)`、表/type/factory/accessor 绑定共同定义“这份代码对该 export target 期望的数据结构”。成功 Open 后该 registry、SchemaHash 与 ExportTargetId 在 Close 前固定,Switch/Refresh 不得替换或重解释它们。
-- 状态由运行时注册表侧表承载,不向生成类注入基类字段。RuntimeDatabase 必须提供按实例或 identity 查询 `RuntimeAssetState` 的无歧义入口;具体成员名在 API surface 冻结前仍为 Provisional。
+- 状态由运行时注册表侧表承载,不向生成类注入基类字段。RuntimeDatabase 提供按实例、identity 与 generation-checked AssetKey 查询 `RuntimeAssetState` 的无歧义入口。
 - 行从新 source 消失时,原实例转 `Missing`:从 key/path/枚举查询剔除,字段重置为 schema materialized 默认值,内部引用 `TryGet` 返回 false,并发布 Removed/DependencyChanged。旧引用不得静默指向另一行。
 - 同一 identity 后续重新出现且生成类型兼容时,复用原实例、patch 新值并转回 Resident;发布 Added 及必要 PropertyChanged/DependencyChanged。类型或 layout 无法安全 patch 时走 Recreated,不得伪装普通属性修改。
 - Close 后不再允许查询 source 数据;旧 `AssetKey` 失效。POCO 已被业务持有时仍只能通过状态侧表判断有效性,不能依赖字段值猜 Missing。
@@ -95,8 +95,8 @@ public static class RuntimeDatabase
     public static void Prewarm();
 
     public static T? LoadAsset<T>(string key) where T : class;
-    public static bool TryGetAssetKey<T>(string key, out AssetKey key) where T : class;
-    public static bool TryGetAsset<T>(AssetKey key, out T asset) where T : class;
+    public static bool TryGetAssetKey<T>(string key, out AssetKey assetKey) where T : class;
+    public static bool TryGetAsset<T>(AssetKey assetKey, out T asset) where T : class;
     public static RuntimeQueryStatus GetAssets<T>(Span<T> buffer, out int count) where T : class;
 
     public static RuntimeMode mode { get; }
@@ -147,7 +147,7 @@ public static class RuntimeDatabase
 - `changed` 在 commit 完成后同步派发;回调看到的是新 revision 的完整状态。
 - 回调期间禁止重入 Open/Switch/Refresh/Close 等写事务;一律抛 `InvalidOperationException`,不在本模块引入隐式排队语义。
 - 同一发布内索引、依赖图、resident 字段与事件列表属于同一 revision;读取方不得观察半更新。
-- 本节只固定 RuntimeDatabase 内部 commit 与 ChangeSet 顺序;Editor import view/report、`workbookImported` 与后续 Runtime ChangeSet 的跨模块可观察次序仍归 M6 OD7,不得由 adapter 偷渡默认。
+- 本节固定 RuntimeDatabase 内部 commit 与 ChangeSet 顺序；跨模块顺序按 M6§9.7 固定为 authoring resident/index → snapshot → report → `workbookImported` → 可选 Runtime refresh/ChangeSet，adapter 不得重排。
 
 ## 7. ChangeSet
 
@@ -224,10 +224,10 @@ public readonly struct ChangeSet
 
 实现热路径禁止 LINQ、捕获闭包、装箱、反射、临时字符串拼接、分配式枚举器和异常控制流。CoreCLR allocation counter 与 Unity ProfilerRecorder 都必须覆盖读取、commit/patch 与事件派发。
 
-## 12. 开放决策
+## 12. 架构决策
 
-1. **ExcelDataSource 装配归属**:语义已由 §3/§9 固定,但工程归属尚未决定——放 `ExcelDb.Core` 的可选 source 包、`ExcelDb.Editor`、还是独立 `ExcelDb.Source.Xlsx`。约束:Core contract 不引用 Unity,Release 不链接 xlsx backend,Editor/Development 复用同一 canonical importer。
-2. **schema hash 是否拆分**:本模块暂按 M1 完整单一 `schema_hash` 做 Open/Switch 硬门禁,ExportTargetId 是与该 hash 正交的显式身份维度,当前 runtime 工件/session 身份为 `(SchemaHash, ExportTargetId)`，不为每个 target 引入 view hash。是否拆为 authoring/runtime semantic/layout/codegen 等 hash 仍由 M8 开放决策统一裁定;裁定前不得自行放宽不匹配 source,也不得以 target-specific hash 先行实现该拆分。
+1. **ExcelDataSource 装配归属**：位于独立可选 `ExcelDb.Source.Xlsx`/authoring adapter；Core contract 不引用 Unity 或 xlsx，Release 不链接 xlsx backend，CLI 与 Editor/Development composition root 复用同一 canonical importer并显式装配。
+2. **schema hash**：v1 固定使用 M1 完整单一 `schema_hash` 做 Open/Switch 硬门禁，ExportTargetId 是与该 hash 正交的显式身份维度，runtime 工件/session identity 为 `(SchemaHash, ExportTargetId)`，不引入 target view hash。
 
 ## 13. 模块验收
 

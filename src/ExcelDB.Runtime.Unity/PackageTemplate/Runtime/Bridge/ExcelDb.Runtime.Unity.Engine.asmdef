@@ -1,0 +1,13 @@
+{
+  "name": "ExcelDb.Runtime.Unity.Engine",
+  "rootNamespace": "ExcelDb.Runtime.Unity",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
