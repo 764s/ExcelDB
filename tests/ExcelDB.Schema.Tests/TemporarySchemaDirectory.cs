@@ -28,6 +28,14 @@ internal sealed class TemporarySchemaDirectory : IDisposable
         File.WriteAllText(fullPath, contents, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
     }
 
+    public void WriteBytes(string logicalPath, ReadOnlySpan<byte> contents)
+    {
+        var fullPath = System.IO.Path.Combine(Path, logicalPath.Replace('/', System.IO.Path.DirectorySeparatorChar));
+        var directory = System.IO.Path.GetDirectoryName(fullPath)!;
+        Directory.CreateDirectory(directory);
+        File.WriteAllBytes(fullPath, contents.ToArray());
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(Path))

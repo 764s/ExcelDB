@@ -22,7 +22,10 @@ public sealed partial class SchemaCompiler
         EmbeddedProtocCompiler? protoc = null,
         CancellationToken cancellationToken = default)
     {
-        var sourceSet = SchemaSourceSet.Discover(schemaDirectory);
+        var actualProtoc = protoc ?? new EmbeddedProtocCompiler();
+        var sourceSet = SchemaSourceSet.Discover(
+            schemaDirectory,
+            actualProtoc.SystemProtoCatalog);
         if (sourceSet.Files.Count == 0)
         {
             return Failed(new SchemaDiagnostic(
@@ -32,7 +35,7 @@ public sealed partial class SchemaCompiler
                 "Schema source set is empty."));
         }
 
-        var compiled = await (protoc ?? new EmbeddedProtocCompiler())
+        var compiled = await actualProtoc
             .CompileAsync(sourceSet, cancellationToken)
             .ConfigureAwait(false);
         return Compile(compiled.DescriptorSet);

@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using ExcelDb.Compatibility;
 using ExcelDb.Core.Diagnostics;
 using ExcelDb.Schema.Authoring;
@@ -19,17 +21,24 @@ public sealed class SchemaPipeline
     private readonly string _toolVersion;
     private readonly ITableInitializer _tableInitializer;
     private readonly IExportTargetStrategy _exportTargetStrategy;
+    private readonly ISystemProtoCatalog _systemProtoCatalog;
+    private readonly EmbeddedProtocCompiler _protocCompiler;
 
     public SchemaPipeline(
         string toolVersion,
         ITableInitializer? tableInitializer = null,
-        IExportTargetStrategy? exportTargetStrategy = null)
+        IExportTargetStrategy? exportTargetStrategy = null,
+        ISystemProtoCatalog? systemProtoCatalog = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(toolVersion);
         _toolVersion = toolVersion;
         _tableInitializer = tableInitializer ?? new DefaultTableInitializer();
         _exportTargetStrategy = exportTargetStrategy ?? new StandardClientServerExportTargetStrategy();
+        _systemProtoCatalog = systemProtoCatalog ?? PackageSystemProtoCatalog.Default;
+        _protocCompiler = new EmbeddedProtocCompiler(_systemProtoCatalog);
     }
+
+    public ISystemProtoCatalog SystemProtoCatalog => _systemProtoCatalog;
 
     public async Task<CompiledProjectSchema?> CompileAsync(
         PipelineProject project,
@@ -40,14 +49,30 @@ public sealed class SchemaPipeline
         ArgumentNullException.ThrowIfNull(diagnostics);
         try
         {
-            var sourceSet = SchemaSourceSet.Discover(project.Context.SchemaDirectory);
+            var schemaInputSet = InputSetSnapshot.Capture(
+                project.Context.RootDirectory,
+                project.Context.SchemaDirectory,
+                InputSetKind.SchemaProto);
+            var mirror = new SystemProtoMirror().Analyze(project.Context, _systemProtoCatalog, explicitRepair: false);
+            foreach (var diagnostic in mirror.Diagnostics)
+                diagnostics.Add(diagnostic);
+            if (mirror.HasBlockers)
+                return null;
+
+            var sourceSet = SchemaSourceSet.Discover(
+                project.Context.SchemaDirectory,
+                _systemProtoCatalog,
+                mirror.TrustedStaleFiles);
+            EnsureSourceSetMatchesSnapshot(schemaInputSet, sourceSet);
             if (sourceSet.Files.Count == 0)
             {
                 diagnostics.Add(new Diagnostic("XDB000", DiagnosticSeverity.Blocker, project.Context.Project.SchemaDir, "Schema source set is empty."));
                 return null;
             }
 
-            var protoc = await new EmbeddedProtocCompiler().CompileAsync(sourceSet, cancellationToken).ConfigureAwait(false);
+            var protoc = await _protocCompiler.CompileAsync(sourceSet, cancellationToken).ConfigureAwait(false);
+            if (!InputSetSnapshot.Matches(project.Context.RootDirectory, schemaInputSet))
+                throw new InvalidDataException("Schema inputs changed while they were being compiled; create a fresh plan.");
             var compilation = new SchemaCompiler().CompileDescriptorSet(protoc.DescriptorSet);
             foreach (var diagnostic in compilation.Diagnostics)
                 diagnostics.Add(ToDiagnostic(diagnostic));
@@ -57,11 +82,25 @@ public sealed class SchemaPipeline
                 protoc.DescriptorSet,
                 protoc.DescriptorBytes.ToArray(),
                 compilation.Descriptor!,
-                compilation.Diagnostics.Select(ToDiagnostic).ToImmutableArray());
+                compilation.Diagnostics.Select(ToDiagnostic).ToImmutableArray(),
+                schemaInputSet,
+                mirror.ReservedInputSet,
+                mirror.ManifestObservation);
         }
         catch (ProtocCompilationException exception)
         {
             diagnostics.Add(new Diagnostic("XDB-PROTOC", DiagnosticSeverity.Blocker, project.Context.Project.SchemaDir, exception.Message));
+            return null;
+        }
+        catch (SystemProtoMirrorException exception)
+        {
+            diagnostics.Add(new Diagnostic(
+                exception.Problem == SystemProtoMirrorProblem.Modified
+                    ? "system-import.modified"
+                    : "system-import.unknown-reserved",
+                DiagnosticSeverity.Blocker,
+                exception.LogicalPath,
+                exception.Message));
             return null;
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException)
@@ -81,14 +120,20 @@ public sealed class SchemaPipeline
         if (schema is null)
             return FailedBuild("schema-build", diagnostics);
 
-        var generation = new SchemaCodeGenerator().Generate(schema.Descriptor);
+        var generation = new SchemaCodeGenerator().Generate(schema.Descriptor, _systemProtoCatalog.CatalogHash);
         AddCompatibilityDiagnostics(project, schema, diagnostics);
 
         var builder = CreatePlanBuilder(project, "schema-build", schema.Descriptor.SchemaHash);
-        ObserveSchemaInputs(builder, project);
+        ObserveSchemaInputs(builder, project, schema);
+        if (!checkOnly)
+            AddSystemProtoMirrorMutations(builder, project, explicitRepair: false);
         AddGeneratedArtifacts(builder, project, generation, checkOnly, diagnostics);
         var descriptorPath = DescriptorCachePath(project);
-        if (!checkOnly || !File.Exists(descriptorPath) || !File.ReadAllBytes(descriptorPath).AsSpan().SequenceEqual(schema.DescriptorBytes))
+        var descriptorFresh = File.Exists(descriptorPath)
+                              && File.ReadAllBytes(descriptorPath).AsSpan().SequenceEqual(schema.DescriptorBytes);
+        if (checkOnly && !descriptorFresh)
+            diagnostics.Add(new Diagnostic("descriptor.stale", DiagnosticSeverity.Error, Relative(project, descriptorPath), "Descriptor cache is stale; run schema build."));
+        else if (!checkOnly && !descriptorFresh)
             WriteIfChanged(builder, descriptorPath, schema.DescriptorBytes);
 
         var plan = builder.Build();
@@ -136,7 +181,9 @@ public sealed class SchemaPipeline
         diagnostics.AddRange(mutation.Diagnostics.Select(ToDiagnostic));
 
         var builder = CreatePlanBuilder(project, "table-create", current.Descriptor?.SchemaHash ?? 0);
-        ObserveSchemaInputs(builder, project);
+        ObserveSchemaInputs(builder, project, current);
+        ObserveExcelInputs(builder, project);
+        AddSystemProtoMirrorMutations(builder, project, explicitRepair: false);
         builder.AddDiagnostic(new Diagnostic("table.initializer", DiagnosticSeverity.Info, intent.TableName, $"Initializer '{_tableInitializer.Id}' materialized the table draft."));
         builder.AddDiagnostic(new Diagnostic("table.export-strategy", DiagnosticSeverity.Info, intent.TableName, $"Export target strategy '{_exportTargetStrategy.Id}' materialized automatic selections."));
         if (!mutation.Succeeded)
@@ -157,9 +204,9 @@ public sealed class SchemaPipeline
         AddCompatibilityDiagnostics(current.Descriptor, candidate.Descriptor, diagnostics);
         AddCandidateSchemaAndCode(builder, project, mutation, candidate);
 
-        var workbookPath = project.Context.ResolvePath(intent.WorkbookPath);
         try
         {
+            var workbookPath = ResolveWorkbooks(project, intent.WorkbookPath).Single();
             var workbookBytes = WorkbookProjection.CreateOrAddTable(
                 workbookPath,
                 candidate.Descriptor,
@@ -189,7 +236,9 @@ public sealed class SchemaPipeline
         var diagnostics = new List<Diagnostic>();
         var current = await CompileRequired(project, diagnostics, cancellationToken).ConfigureAwait(false);
         var builder = CreatePlanBuilder(project, intent.Retire ? "table-retire" : "table-edit", current?.Descriptor.SchemaHash ?? 0);
-        ObserveSchemaInputs(builder, project);
+        ObserveSchemaInputs(builder, project, current);
+        ObserveExcelInputs(builder, project);
+        AddSystemProtoMirrorMutations(builder, project, explicitRepair: false);
         if (current is null)
         {
             foreach (var diagnostic in diagnostics)
@@ -261,35 +310,143 @@ public sealed class SchemaPipeline
     internal static IEnumerable<string> ResolveWorkbooks(PipelineProject project, string? explicitPath = null)
     {
         if (explicitPath is not null)
-            return [project.Context.ResolvePath(explicitPath)];
-        var result = new SortedSet<string>(StringComparer.Ordinal);
-        foreach (var glob in project.Context.Project.Workbooks)
         {
-            var normalized = glob.Replace('/', Path.DirectorySeparatorChar);
-            var directoryPart = Path.GetDirectoryName(normalized) ?? ".";
-            var pattern = Path.GetFileName(normalized);
-            var directory = project.Context.ResolvePath(directoryPart);
-            if (!Directory.Exists(directory))
-                continue;
-            foreach (var file in Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly))
-                result.Add(Path.GetFullPath(file));
+            var candidate = Path.IsPathFullyQualified(explicitPath)
+                ? Path.GetFullPath(explicitPath)
+                : explicitPath.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) < 0
+                    ? Path.GetFullPath(explicitPath, project.Context.ExcelDirectory)
+                    : project.Context.ResolvePath(explicitPath);
+            var relative = Path.GetRelativePath(project.Context.ExcelDirectory, candidate);
+            if (Path.IsPathFullyQualified(relative)
+                || relative == ".."
+                || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("Workbook paths must remain inside Project v2 excelDir.");
+            }
+            if (Path.GetFileName(candidate).StartsWith("~$", StringComparison.Ordinal)
+                || !string.Equals(Path.GetExtension(candidate), ".xlsx", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("A workbook path must name a non-temporary .xlsx file.");
+            }
+            EnsureNoReparseTraversal(project.Context.ExcelDirectory, candidate);
+            return [candidate];
         }
-        return result;
+        return project.Context.EnumerateExcelFiles();
+    }
+
+    private static void EnsureNoReparseTraversal(string root, string candidate)
+    {
+        var current = Path.GetFullPath(root);
+        if (Directory.Exists(current)
+            && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException("excelDir must not be a symbolic link, junction, or other reparse point.");
+        }
+
+        var relative = Path.GetRelativePath(current, Path.GetFullPath(candidate));
+        foreach (var segment in relative.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (!File.Exists(current) && !Directory.Exists(current))
+                break;
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("Workbook paths must not traverse a symbolic link, junction, or other reparse point.");
+        }
     }
 
     internal static string Relative(PipelineProject project, string path) =>
         Path.GetRelativePath(project.Context.RootDirectory, path).Replace('\\', '/');
 
     internal MutationPlanBuilder CreatePlanBuilder(PipelineProject project, string operation, ulong schemaHash) =>
-        new MutationPlanBuilder(operation, _toolVersion, project.Context.RootDirectory, project.ConfigHash, schemaHash)
+        new MutationPlanBuilder(
+                operation,
+                _toolVersion,
+                project.Context.RootDirectory,
+                project.Context.GeneratedCSharpDirectory,
+                project.ConfigHash,
+                _systemProtoCatalog.CatalogHash,
+                schemaHash)
             .Observe(project.Context.ProjectFilePath);
 
-    internal static void ObserveSchemaInputs(MutationPlanBuilder builder, PipelineProject project)
+    internal void ObserveSchemaInputs(
+        MutationPlanBuilder builder,
+        PipelineProject project,
+        CompiledProjectSchema? compiled = null)
     {
         if (!Directory.Exists(project.Context.SchemaDirectory))
             return;
-        foreach (var file in Directory.EnumerateFiles(project.Context.SchemaDirectory, "*.proto", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
-            builder.Observe(file);
+        try
+        {
+            if (compiled?.SchemaInputSet is not null)
+            {
+                builder.ObserveSchemaInputSet(compiled.SchemaInputSet);
+                if (compiled.SystemProtoMirrorInputSet is not null)
+                    builder.ObserveSystemProtoMirrorSet(compiled.SystemProtoMirrorInputSet);
+                if (compiled.SystemImportsManifestObservation is not null)
+                    builder.Observe(compiled.SystemImportsManifestObservation);
+                return;
+            }
+
+            builder.ObserveSchemaInputSet(project.Context.SchemaDirectory);
+            var mirror = new SystemProtoMirror().Analyze(project.Context, _systemProtoCatalog, explicitRepair: false);
+            if (mirror.ReservedInputSet is not null)
+                builder.ObserveSystemProtoMirrorSet(mirror.ReservedInputSet);
+            if (mirror.ManifestObservation is not null)
+                builder.Observe(mirror.ManifestObservation);
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            builder.AddDiagnostic(new Diagnostic(
+                "schema.observe",
+                DiagnosticSeverity.Blocker,
+                project.Context.Project.SchemaDir,
+                exception.Message));
+        }
+    }
+
+    internal static InputSetObservation CaptureExcelInputs(PipelineProject project) =>
+        InputSetSnapshot.Capture(
+            project.Context.RootDirectory,
+            project.Context.ExcelDirectory,
+            InputSetKind.ExcelWorkbook);
+
+    internal static void ObserveExcelInputs(
+        MutationPlanBuilder builder,
+        PipelineProject project,
+        InputSetObservation? frozen = null) =>
+        builder.ObserveExcelInputSet(frozen ?? CaptureExcelInputs(project));
+
+    private static void EnsureSourceSetMatchesSnapshot(
+        InputSetObservation snapshot,
+        SchemaSourceSet sourceSet)
+    {
+        if (snapshot.Kind != InputSetKind.SchemaProto
+            || snapshot.RootKind != ObservedPathKind.Directory)
+        {
+            throw new InvalidDataException("Schema input snapshot does not describe an existing directory.");
+        }
+
+        var expected = snapshot.Entries.ToDictionary(
+            static entry => entry.RelativePath,
+            StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var file in sourceSet.Files)
+        {
+            if (!expected.TryGetValue(file.LogicalPath, out var entry)
+                || entry.Kind != ObservedPathKind.File
+                || entry.Length != file.Length
+                || !string.Equals(entry.Sha256, file.Sha256, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Schema input '{file.LogicalPath}' changed between snapshot and source discovery.");
+            }
+            seen.Add(file.LogicalPath);
+        }
+        if (seen.Count != expected.Count || expected.Keys.Any(path => !seen.Contains(path)))
+            throw new InvalidDataException("The recursive business Schema *.proto member set changed during source discovery.");
     }
 
     internal static void WriteIfChanged(MutationPlanBuilder builder, string path, byte[] content)
@@ -299,14 +456,74 @@ public sealed class SchemaPipeline
         builder.WriteFile(path, content);
     }
 
+    internal static void AddDescriptorCache(
+        MutationPlanBuilder builder,
+        PipelineProject project,
+        CompiledProjectSchema schema) =>
+        WriteIfChanged(builder, DescriptorCachePath(project), schema.DescriptorBytes);
+
+    internal SystemProtoMirrorAnalysis AddSystemProtoMirrorMutations(
+        MutationPlanBuilder builder,
+        PipelineProject project,
+        bool explicitRepair)
+    {
+        var analysis = new SystemProtoMirror().Analyze(project.Context, _systemProtoCatalog, explicitRepair);
+        if (analysis.ReservedInputSet is not null)
+            builder.ObserveSystemProtoMirrorSet(analysis.ReservedInputSet);
+        if (analysis.ManifestObservation is not null)
+            builder.Observe(analysis.ManifestObservation);
+        if (analysis.HasBlockers)
+            return analysis;
+        foreach (var mutation in analysis.Mutations)
+        {
+            if (mutation.Kind == SystemProtoMirrorMutationKind.DeleteFile)
+                builder.DeleteFile(mutation.AbsolutePath);
+            else
+                builder.WriteFile(mutation.AbsolutePath, mutation.Content!);
+        }
+        return analysis;
+    }
+
+    private static void WriteGeneratedIfChanged(
+        MutationPlanBuilder builder,
+        PipelineProject project,
+        string logicalPath,
+        string absolutePath,
+        byte[] content)
+    {
+        if (File.Exists(absolutePath) && File.ReadAllBytes(absolutePath).AsSpan().SequenceEqual(content))
+            return;
+        builder.WriteFile(PlanRootKind.GeneratedCSharp, logicalPath, content);
+    }
+
     private async Task<CompiledProjectSchema?> CompileCurrentSetOrEmpty(
         PipelineProject project,
         ICollection<Diagnostic> diagnostics,
         CancellationToken cancellationToken)
     {
-        var sourceSet = SchemaSourceSet.Discover(project.Context.SchemaDirectory);
+        var schemaInputSet = InputSetSnapshot.Capture(
+            project.Context.RootDirectory,
+            project.Context.SchemaDirectory,
+            InputSetKind.SchemaProto);
+        var mirror = new SystemProtoMirror().Analyze(project.Context, _systemProtoCatalog, explicitRepair: false);
+        foreach (var diagnostic in mirror.Diagnostics)
+            diagnostics.Add(diagnostic);
+        if (mirror.HasBlockers)
+            return null;
+        var sourceSet = SchemaSourceSet.Discover(
+            project.Context.SchemaDirectory,
+            _systemProtoCatalog,
+            mirror.TrustedStaleFiles);
+        EnsureSourceSetMatchesSnapshot(schemaInputSet, sourceSet);
         if (sourceSet.Files.Count == 0)
-            return new CompiledProjectSchema(new FileDescriptorSet(), [], null!, []);
+            return new CompiledProjectSchema(
+                new FileDescriptorSet(),
+                [],
+                null!,
+                [],
+                schemaInputSet,
+                mirror.ReservedInputSet,
+                mirror.ManifestObservation);
         return await CompileAsync(project, diagnostics, cancellationToken).ConfigureAwait(false);
     }
 
@@ -332,55 +549,97 @@ public sealed class SchemaPipeline
         foreach (var proto in mutation.CandidateProtoFiles.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
             WriteIfChanged(builder, Path.Combine(project.Context.SchemaDirectory, proto.Key.Replace('/', Path.DirectorySeparatorChar)), Encoding.UTF8.GetBytes(proto.Value));
         WriteIfChanged(builder, DescriptorCachePath(project), candidate.DescriptorBytes);
-        AddGeneratedArtifacts(builder, project, new SchemaCodeGenerator().Generate(candidate.Descriptor), checkOnly: false, diagnostics: null);
+        AddGeneratedArtifacts(
+            builder,
+            project,
+            new SchemaCodeGenerator().Generate(candidate.Descriptor, _systemProtoCatalog.CatalogHash),
+            checkOnly: false,
+            diagnostics: null);
     }
 
-    private static void AddGeneratedArtifacts(
+    internal void AddGeneratedArtifacts(
         MutationPlanBuilder builder,
         PipelineProject project,
         SchemaCodeGenerationResult generation,
         bool checkOnly,
         ICollection<Diagnostic>? diagnostics)
     {
-        var expectedFiles = generation.Artifacts
-            .Select(artifact => Path.GetFullPath(Path.Combine(
-                project.Context.GeneratedDirectory,
-                artifact.RelativePath.Replace('/', Path.DirectorySeparatorChar))))
+        var ownership = ReadCodegenOwnership(project, builder, diagnostics);
+        if (!ownership.Valid)
+            return;
+
+        var expectedPaths = generation.Artifacts
+            .Select(static artifact => artifact.RelativePath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var ownershipFailure = false;
+        foreach (var owned in ownership.Files)
+        {
+            var path = ResolveGeneratedPath(project, owned.Key);
+            if (!File.Exists(path))
+                continue;
+            var actualHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+            if (string.Equals(actualHash, owned.Value, StringComparison.Ordinal))
+                continue;
+            AddCodegenDiagnostic(
+                builder,
+                diagnostics,
+                new Diagnostic(
+                    "codegen.owned-modified",
+                    DiagnosticSeverity.Blocker,
+                    owned.Key,
+                    "A file recorded by codegen.manifest.json was modified after generation; ExcelDB will not overwrite or delete it."));
+            ownershipFailure = true;
+        }
 
         foreach (var artifact in generation.Artifacts)
         {
-            var target = Path.Combine(project.Context.GeneratedDirectory, artifact.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            var target = ResolveGeneratedPath(project, artifact.RelativePath);
             var content = Encoding.UTF8.GetBytes(artifact.Content);
+            if (File.Exists(target) && !ownership.Files.ContainsKey(artifact.RelativePath))
+            {
+                AddCodegenDiagnostic(
+                    builder,
+                    diagnostics,
+                    new Diagnostic(
+                        "codegen.path-collision",
+                        DiagnosticSeverity.Blocker,
+                        artifact.RelativePath,
+                        "The generated target path contains an unknown file not owned by codegen.manifest.json."));
+                ownershipFailure = true;
+                continue;
+            }
             if (checkOnly)
             {
                 if (!File.Exists(target) || !File.ReadAllBytes(target).AsSpan().SequenceEqual(content))
                     diagnostics?.Add(new Diagnostic("codegen.stale", DiagnosticSeverity.Error, Relative(project, target), "Generated C# is stale; run schema build."));
             }
-            else
-            {
-                WriteIfChanged(builder, target, content);
-            }
+            else if (!ownershipFailure)
+                WriteGeneratedIfChanged(builder, project, artifact.RelativePath, target, content);
         }
 
-        foreach (var ghost in EnumerateOwnedGeneratedFiles(project.Context.GeneratedDirectory)
-                     .Where(path => !expectedFiles.Contains(path)))
+        if (ownershipFailure)
+            return;
+
+        foreach (var ghost in ownership.Files.Where(pair => !expectedPaths.Contains(pair.Key)))
         {
+            var ghostPath = ResolveGeneratedPath(project, ghost.Key);
+            if (!File.Exists(ghostPath))
+                continue;
             if (checkOnly)
             {
                 diagnostics?.Add(new Diagnostic(
                     "codegen.ghost",
                     DiagnosticSeverity.Error,
-                    Relative(project, ghost),
+                    ghost.Key,
                     "Generated C# is not present in the current target manifest; run schema build to remove the stale runtime surface."));
             }
             else
             {
-                builder.DeleteFile(ghost);
+                builder.DeleteFile(PlanRootKind.GeneratedCSharp, ghost.Key);
             }
         }
 
-        var manifestPath = Path.Combine(project.Context.GeneratedDirectory, "codegen.manifest.json");
+        var manifestPath = Path.Combine(project.Context.GeneratedCSharpDirectory, "codegen.manifest.json");
         var manifest = Encoding.UTF8.GetBytes(generation.Manifest.Json + "\n");
         if (checkOnly)
         {
@@ -389,24 +648,94 @@ public sealed class SchemaPipeline
         }
         else
         {
-            WriteIfChanged(builder, manifestPath, manifest);
+            WriteGeneratedIfChanged(builder, project, "codegen.manifest.json", manifestPath, manifest);
         }
     }
 
-    private static IEnumerable<string> EnumerateOwnedGeneratedFiles(string generatedDirectory)
+    private static CodegenOwnership ReadCodegenOwnership(
+        PipelineProject project,
+        MutationPlanBuilder builder,
+        ICollection<Diagnostic>? diagnostics)
     {
-        foreach (var ownedDirectory in new[] { "authoring", "runtime" })
+        var manifestPath = Path.Combine(project.Context.GeneratedCSharpDirectory, "codegen.manifest.json");
+        if (!File.Exists(manifestPath))
+            return new CodegenOwnership(true, ImmutableDictionary<string, string>.Empty.WithComparers(StringComparer.OrdinalIgnoreCase));
+        try
         {
-            var root = Path.Combine(generatedDirectory, ownedDirectory);
-            if (!Directory.Exists(root))
-                continue;
-            foreach (var path in Directory.EnumerateFiles(root, "*.g.cs", SearchOption.AllDirectories)
-                         .Order(StringComparer.Ordinal))
+            using var document = JsonDocument.Parse(File.ReadAllBytes(manifestPath), new JsonDocumentOptions
             {
-                yield return Path.GetFullPath(path);
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+            });
+            var root = document.RootElement;
+            if (root.GetProperty("format").GetString() != "exceldb.codegen-manifest.v1")
+                throw new InvalidDataException("Unsupported codegen manifest format.");
+            var files = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var artifact in root.GetProperty("artifacts").EnumerateArray())
+            {
+                var logicalPath = artifact.GetProperty("path").GetString()
+                    ?? throw new InvalidDataException("Codegen manifest artifact path is missing.");
+                _ = ResolveGeneratedPath(project, logicalPath);
+                var hash = artifact.GetProperty("sha256").GetString();
+                if (hash is null || hash.Length != 64 || hash.Any(static character => !Uri.IsHexDigit(character)))
+                    throw new InvalidDataException($"Codegen manifest hash is invalid for '{logicalPath}'.");
+                if (!files.TryAdd(logicalPath, hash.ToLowerInvariant()))
+                    throw new InvalidDataException($"Codegen manifest contains duplicate path '{logicalPath}'.");
             }
+            return new CodegenOwnership(true, files.ToImmutable());
+        }
+        catch (Exception exception) when (exception is IOException
+                                           or InvalidDataException
+                                           or JsonException
+                                           or KeyNotFoundException
+                                           or InvalidOperationException)
+        {
+            AddCodegenDiagnostic(
+                builder,
+                diagnostics,
+                new Diagnostic(
+                    "codegen.manifest-invalid",
+                    DiagnosticSeverity.Blocker,
+                    "codegen.manifest.json",
+                    exception.Message));
+            return new CodegenOwnership(false, ImmutableDictionary<string, string>.Empty);
         }
     }
+
+    private static string ResolveGeneratedPath(PipelineProject project, string logicalPath)
+    {
+        if (string.IsNullOrWhiteSpace(logicalPath)
+            || logicalPath.IndexOf('\\') >= 0
+            || Path.IsPathFullyQualified(logicalPath)
+            || logicalPath.Split('/').Any(static segment => segment.Length == 0 || segment is "." or ".."))
+        {
+            throw new InvalidDataException($"Generated path '{logicalPath}' is not canonical.");
+        }
+        var path = Path.GetFullPath(logicalPath.Replace('/', Path.DirectorySeparatorChar), project.Context.GeneratedCSharpDirectory);
+        var relative = Path.GetRelativePath(project.Context.GeneratedCSharpDirectory, path);
+        if (Path.IsPathFullyQualified(relative)
+            || relative == ".."
+            || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException($"Generated path '{logicalPath}' escapes generatedCSharpDir.");
+        }
+        return path;
+    }
+
+    private static void AddCodegenDiagnostic(
+        MutationPlanBuilder builder,
+        ICollection<Diagnostic>? diagnostics,
+        Diagnostic diagnostic)
+    {
+        if (diagnostics is null)
+            builder.AddDiagnostic(diagnostic);
+        else
+            diagnostics.Add(diagnostic);
+    }
+
+    private sealed record CodegenOwnership(
+        bool Valid,
+        ImmutableDictionary<string, string> Files);
 
     private static string DescriptorCachePath(PipelineProject project) => Path.Combine(project.Context.CacheDirectory, "schema", "descriptor.pb");
 

@@ -8,6 +8,7 @@
     <Project Path="src/ExcelDB.Editor.Unity/ExcelDB.Editor.Unity.csproj" />
     <Project Path="src/ExcelDB.Editor/ExcelDB.Editor.csproj" />
     <Project Path="src/ExcelDB.Pipeline/ExcelDB.Pipeline.csproj" />
+    <Project Path="src/ExcelDB.ProjectHub.Windows/ExcelDB.ProjectHub.Windows.csproj" />
     <Project Path="src/ExcelDB.Runtime.Excel/ExcelDB.Runtime.Excel.csproj" />
     <Project Path="src/ExcelDB.Runtime.Unity/ExcelDB.Runtime.Unity.csproj" />
     <Project Path="src/ExcelDB.Runtime/ExcelDB.Runtime.csproj" />
@@ -23,6 +24,7 @@
     <Project Path="tests/ExcelDB.Core.Tests/ExcelDB.Core.Tests.csproj" />
     <Project Path="tests/ExcelDB.Editor.Tests/ExcelDB.Editor.Tests.csproj" />
     <Project Path="tests/ExcelDB.Pipeline.Tests/ExcelDB.Pipeline.Tests.csproj" />
+    <Project Path="tests/ExcelDB.ProjectHub.Windows.Tests/ExcelDB.ProjectHub.Windows.Tests.csproj" />
     <Project Path="tests/ExcelDB.Runtime.Excel.Tests/ExcelDB.Runtime.Excel.Tests.csproj" />
     <Project Path="tests/ExcelDB.Runtime.Tests/ExcelDB.Runtime.Tests.csproj" />
     <Project Path="tests/ExcelDB.Runtime.Unity.Tests/ExcelDB.Runtime.Unity.Tests.csproj" />

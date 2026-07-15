@@ -1,4 +1,4 @@
-name: Release Windows CLI
+name: Release Windows EXE
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  windows-cli:
+  windows-exe:
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -27,12 +27,284 @@ jobs:
       - name: Test
         run: dotnet test ExcelDB.slnx -c Release --no-restore
 
-      - name: Publish single-file CLI
+      - name: Publish single-file EXE
         run: >-
           dotnet publish src/ExcelDB.Cli/ExcelDB.Cli.csproj
           -c Release
           -p:PublishProfile=win-x64
           -o artifacts/exceldb-win-x64
+
+      - name: Release smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $publish = (Resolve-Path artifacts/exceldb-win-x64).Path
+          $files = @(Get-ChildItem -LiteralPath $publish -File -Recurse -Force)
+          if ($files.Count -ne 1 -or $files[0].Name -ne "exceldb.exe") {
+            throw "Release must contain exactly one file named exceldb.exe; found: $($files.Name -join ', ')"
+          }
+
+          $exe = $files[0].FullName
+          $project = Join-Path (Resolve-Path artifacts).Path "release-smoke-project"
+          $portableRoot = Join-Path (Resolve-Path artifacts).Path "portable BAT 工具"
+          $portableProject = Join-Path (Resolve-Path artifacts).Path "portable BAT 项目 含空格"
+          $portableCSharp = Join-Path (Resolve-Path artifacts).Path "portable 外部 CSharp 中文 空格"
+          $installedProject = Join-Path (Resolve-Path artifacts).Path "installed BAT 项目 含空格"
+          $installedCSharp = Join-Path (Resolve-Path artifacts).Path "installed 外部 CSharp 中文 空格"
+          $legacyProject = Join-Path (Resolve-Path artifacts).Path "legacy-v1-must-be-rejected"
+          $installedBat = (Resolve-Path samples/init-with-installed-exceldb.bat).Path
+          $portableBat = Join-Path $portableRoot "init-with-portable-exceldb.bat"
+          $cmd = Join-Path $env:SystemRoot "System32/cmd.exe"
+          New-Item -ItemType Directory -Path $project -Force | Out-Null
+          New-Item -ItemType Directory -Path $portableRoot -Force | Out-Null
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $portableRoot "exceldb.exe")
+          Copy-Item -LiteralPath samples/init-with-portable-exceldb.bat -Destination $portableBat
+
+          function Invoke-ExcelDb([string[]] $CommandArgs) {
+            & $exe @CommandArgs
+            if ($LASTEXITCODE -ne 0) {
+              throw "exceldb $($CommandArgs -join ' ') failed with exit code $LASTEXITCODE"
+            }
+          }
+
+          function Invoke-InitBat(
+            [string] $BatPath,
+            [string] $TargetPath,
+            [string] $GeneratedCSharpPath
+          ) {
+            & $cmd /d /c call "`"$BatPath`"" "`"$TargetPath`"" "`"$GeneratedCSharpPath`""
+            if ($LASTEXITCODE -ne 0) {
+              throw "$BatPath failed with exit code $LASTEXITCODE"
+            }
+          }
+
+          function Assert-ProjectV2(
+            [string] $ProjectRoot,
+            [string] $ExpectedGeneratedCSharp = "Generated/CSharp"
+          ) {
+            $configPath = Join-Path $ProjectRoot ".exceldb/project.json"
+            if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+              throw "BAT smoke did not produce $configPath"
+            }
+
+            $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+            $propertyNames = @($config.PSObject.Properties.Name)
+            $expectedProperties = @(
+              "formatVersion",
+              "schemaDir",
+              "excelDir",
+              "generatedCSharpDir",
+              "generatedBytesDir"
+            )
+            if ($propertyNames.Count -ne $expectedProperties.Count) {
+              throw "Project v2 config must contain exactly five fields; found: $($propertyNames -join ', ')"
+            }
+            foreach ($propertyName in $expectedProperties) {
+              if ($propertyNames -notcontains $propertyName) {
+                throw "Project v2 config is missing $propertyName"
+              }
+            }
+            if ($config.formatVersion -ne 2 -or
+                $config.schemaDir -ne "Schema" -or
+                $config.excelDir -ne "Excel" -or
+                $config.generatedCSharpDir -ne $ExpectedGeneratedCSharp -or
+                $config.generatedBytesDir -ne "Generated/Bytes") {
+              throw "BAT smoke produced an unexpected Project v2 projection: $($config | ConvertTo-Json -Compress)"
+            }
+
+            foreach ($relativeDirectory in @("Schema", "Excel", "Generated/Bytes")) {
+              $directory = Join-Path $ProjectRoot $relativeDirectory
+              if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+                throw "BAT smoke did not create the $relativeDirectory artifact directory."
+              }
+            }
+            if ($ExpectedGeneratedCSharp -eq "Generated/CSharp") {
+              if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "Generated/CSharp") -PathType Container)) {
+                throw "BAT smoke did not create the default Generated/CSharp artifact directory."
+              }
+            }
+            else {
+              if (-not (Test-Path -LiteralPath $ExpectedGeneratedCSharp -PathType Container)) {
+                throw "BAT smoke did not create the external Generated C# directory $ExpectedGeneratedCSharp."
+              }
+              if (Test-Path -LiteralPath (Join-Path $ProjectRoot "Generated/CSharp")) {
+                throw "External Generated C# configuration created a misleading local Generated/CSharp copy."
+              }
+            }
+            foreach ($retiredPath in @("ExcelDb.Project.json", "Config", "Data", "Import", "Build")) {
+              if (Test-Path -LiteralPath (Join-Path $ProjectRoot $retiredPath)) {
+                throw "BAT smoke recreated retired Project v1 path $retiredPath."
+              }
+            }
+          }
+
+          $originalPath = $env:PATH
+          $originalDotnetRoot = $env:DOTNET_ROOT
+          $originalDotnetRootX64 = $env:DOTNET_ROOT_X64
+          $originalMultilevelLookup = $env:DOTNET_MULTILEVEL_LOOKUP
+          $originalHttpProxy = $env:HTTP_PROXY
+          $originalHttpsProxy = $env:HTTPS_PROXY
+          $originalAllProxy = $env:ALL_PROXY
+          $originalNoProxy = $env:NO_PROXY
+          $networkRuleName = "ExcelDB release smoke outbound block $([Guid]::NewGuid().ToString('N'))"
+          New-NetFirewallRule `
+            -DisplayName $networkRuleName `
+            -Direction Outbound `
+            -Program $exe `
+            -Action Block `
+            -Profile Any `
+            -ErrorAction Stop | Out-Null
+          $env:PATH = ""
+          $env:DOTNET_ROOT = "Z:\missing-dotnet"
+          $env:DOTNET_ROOT_X64 = "Z:\missing-dotnet"
+          $env:DOTNET_MULTILEVEL_LOOKUP = "0"
+          $env:HTTP_PROXY = "http://127.0.0.1:9"
+          $env:HTTPS_PROXY = "http://127.0.0.1:9"
+          $env:ALL_PROXY = "http://127.0.0.1:9"
+          $env:NO_PROXY = ""
+          try {
+            Invoke-InitBat -BatPath $portableBat -TargetPath $portableProject -GeneratedCSharpPath $portableCSharp
+            Assert-ProjectV2 -ProjectRoot $portableProject -ExpectedGeneratedCSharp $portableCSharp
+
+            $env:PATH = $publish
+            Invoke-InitBat -BatPath $installedBat -TargetPath $installedProject -GeneratedCSharpPath $installedCSharp
+            Assert-ProjectV2 -ProjectRoot $installedProject -ExpectedGeneratedCSharp $installedCSharp
+            $env:PATH = ""
+
+            & $exe *> $null
+            if ($LASTEXITCODE -ne 3) {
+              throw "Redirected no-argument launch must print usage and exit 3; got $LASTEXITCODE"
+            }
+
+            Invoke-ExcelDb -CommandArgs @("init", $project)
+            Push-Location $project
+            try {
+              Invoke-ExcelDb -CommandArgs @("table", "create", "Hero", "--workbook", "Excel/game.xlsx", "--field", "id:string:key", "--field", "name:string", "--field", "hp:int32")
+              Invoke-ExcelDb -CommandArgs @("table", "edit", "game.configs.Hero", "--add", "speed:float")
+              Invoke-ExcelDb -CommandArgs @("generate")
+              Invoke-ExcelDb -CommandArgs @("data", "prepare")
+              Invoke-ExcelDb -CommandArgs @("check")
+              Invoke-ExcelDb -CommandArgs @("convert", "--target", "client")
+              Invoke-ExcelDb -CommandArgs @("convert", "--target", "server")
+              Invoke-ExcelDb -CommandArgs @("project", "inspect")
+              Invoke-ExcelDb -CommandArgs @("schema", "publish")
+
+              $expected = @(
+                ".exceldb/project.json",
+                ".exceldb/system-imports.json",
+                "Schema/exceldb/options.proto",
+                "Schema/google/protobuf/descriptor.proto",
+                "Excel/game.xlsx",
+                "Generated/CSharp/codegen.manifest.json",
+                "Generated/Bytes/client/config.bytes",
+                "Generated/Bytes/client/config.bytes.manifest.json",
+                "Generated/Bytes/server/config.bytes",
+                "Generated/Bytes/server/config.bytes.manifest.json",
+                ".exceldb/published/published.json"
+              )
+              foreach ($relativePath in $expected) {
+                if (-not (Test-Path -LiteralPath $relativePath -PathType Leaf)) {
+                  throw "Release smoke did not produce $relativePath"
+                }
+              }
+              $publishedDescriptors = @(Get-ChildItem -LiteralPath ".exceldb/published" -Filter "descriptor-*.pb" -File -Force)
+              if ($publishedDescriptors.Count -ne 1) {
+                throw "Initial schema publish must create exactly one published descriptor; found $($publishedDescriptors.Count)."
+              }
+
+              $expectedGoogleProtos = @(
+                "any.proto",
+                "api.proto",
+                "descriptor.proto",
+                "duration.proto",
+                "empty.proto",
+                "field_mask.proto",
+                "source_context.proto",
+                "struct.proto",
+                "timestamp.proto",
+                "type.proto",
+                "wrappers.proto"
+              )
+              $googleProtos = @(
+                Get-ChildItem -LiteralPath "Schema/google/protobuf" -Filter *.proto -File -Recurse -Force |
+                  ForEach-Object { $_.Name } |
+                  Sort-Object
+              )
+              if ($googleProtos.Count -ne $expectedGoogleProtos.Count -or
+                  (Compare-Object $expectedGoogleProtos $googleProtos)) {
+                throw "System proto mirror differs from the canonical 11-file Google catalog: $($googleProtos -join ', ')"
+              }
+
+              foreach ($hiddenDirectory in @(".exceldb", "Schema/exceldb", "Schema/google", "Schema/google/protobuf")) {
+                $attributes = (Get-Item -LiteralPath $hiddenDirectory -Force).Attributes
+                if (($attributes -band [System.IO.FileAttributes]::Hidden) -eq 0) {
+                  throw "$hiddenDirectory is not Hidden."
+                }
+              }
+              $systemProtoFiles = @(
+                Get-ChildItem -LiteralPath "Schema/exceldb", "Schema/google/protobuf" -Filter *.proto -File -Recurse -Force
+              )
+              foreach ($systemProtoFile in $systemProtoFiles) {
+                if (($systemProtoFile.Attributes -band [System.IO.FileAttributes]::ReadOnly) -eq 0) {
+                  throw "$($systemProtoFile.FullName) is not ReadOnly."
+                }
+              }
+
+              foreach ($hiddenDirectory in @(".exceldb", "Schema/exceldb", "Schema/google", "Schema/google/protobuf")) {
+                $item = Get-Item -LiteralPath $hiddenDirectory -Force
+                [System.IO.File]::SetAttributes(
+                  $item.FullName,
+                  $item.Attributes -band (-bnot [System.IO.FileAttributes]::Hidden))
+              }
+              foreach ($systemProtoFile in $systemProtoFiles) {
+                [System.IO.File]::SetAttributes(
+                  $systemProtoFile.FullName,
+                  $systemProtoFile.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly))
+              }
+
+              Invoke-ExcelDb -CommandArgs @("project", "inspect")
+              if (((Get-Item -LiteralPath ".exceldb" -Force).Attributes -band [System.IO.FileAttributes]::Hidden) -ne 0) {
+                throw "Read-only project inspect unexpectedly repaired presentation attributes."
+              }
+              Invoke-ExcelDb -CommandArgs @("project", "repair-imports")
+              foreach ($hiddenDirectory in @(".exceldb", "Schema/exceldb", "Schema/google", "Schema/google/protobuf")) {
+                if (((Get-Item -LiteralPath $hiddenDirectory -Force).Attributes -band [System.IO.FileAttributes]::Hidden) -eq 0) {
+                  throw "$hiddenDirectory was not repaired to Hidden."
+                }
+              }
+              foreach ($systemProtoFile in $systemProtoFiles) {
+                if (((Get-Item -LiteralPath $systemProtoFile.FullName -Force).Attributes -band [System.IO.FileAttributes]::ReadOnly) -eq 0) {
+                  throw "$($systemProtoFile.FullName) was not repaired to ReadOnly."
+                }
+              }
+            }
+            finally {
+              Pop-Location
+            }
+
+            New-Item -ItemType Directory -Path $legacyProject -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $legacyProject "ExcelDb.Project.json") -Value "{}" -Encoding utf8NoBOM
+            & $exe init $legacyProject *> $null
+            if ($LASTEXITCODE -ne 2) {
+              throw "Legacy Project v1 init must be rejected with exit 2; got $LASTEXITCODE"
+            }
+            foreach ($unexpected in @(".exceldb", "Schema", "Excel", "Generated")) {
+              if (Test-Path -LiteralPath (Join-Path $legacyProject $unexpected)) {
+                throw "Legacy Project v1 rejection wrote unexpected path $unexpected."
+              }
+            }
+          }
+          finally {
+            $env:PATH = $originalPath
+            $env:DOTNET_ROOT = $originalDotnetRoot
+            $env:DOTNET_ROOT_X64 = $originalDotnetRootX64
+            $env:DOTNET_MULTILEVEL_LOOKUP = $originalMultilevelLookup
+            $env:HTTP_PROXY = $originalHttpProxy
+            $env:HTTPS_PROXY = $originalHttpsProxy
+            $env:ALL_PROXY = $originalAllProxy
+            $env:NO_PROXY = $originalNoProxy
+            Remove-NetFirewallRule -DisplayName $networkRuleName -ErrorAction SilentlyContinue
+          }
 
       - name: Package download
         shell: pwsh

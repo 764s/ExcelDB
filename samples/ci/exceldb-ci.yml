@@ -9,6 +9,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Repair IDE system proto mirror
+        shell: pwsh
+        run: .\tools\exceldb.exe project repair-imports
       - name: Validate schema projection
         shell: pwsh
         run: .\tools\exceldb.exe schema build --check --json .\.exceldb\reports\schema-check.json
@@ -20,7 +23,7 @@ jobs:
         run: .\tools\exceldb.exe convert --target client --json .\.exceldb\reports\convert-client.json
       - name: Convert server
         shell: pwsh
-        run: .\tools\exceldb.exe convert --target server --out Build\ExcelDB\server.bytes --json .\.exceldb\reports\convert-server.json
+        run: .\tools\exceldb.exe convert --target server --json .\.exceldb\reports\convert-server.json
       - name: Upload target-scoped evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -28,6 +31,5 @@ jobs:
           name: exceldb-evidence
           path: |
             .exceldb/reports/*.json
-            Build/ExcelDB/*.bytes
-            Build/ExcelDB/*.manifest.json
-
+            Generated/Bytes/**/*.bytes
+            Generated/Bytes/**/*.manifest.json

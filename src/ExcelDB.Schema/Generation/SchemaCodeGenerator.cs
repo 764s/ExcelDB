@@ -18,7 +18,8 @@ public sealed record SchemaArtifactManifest(
     ulong SchemaHash,
     string CodegenHash,
     string Json,
-    string ManifestHash);
+    string ManifestHash,
+    string? CatalogHash = null);
 
 public sealed record SchemaCodeGenerationResult(
     ImmutableArray<GeneratedSchemaArtifact> Artifacts,
@@ -30,16 +31,31 @@ public sealed record SchemaCodeGenerationResult(
 /// </summary>
 public sealed class SchemaCodeGenerator
 {
-    public SchemaCodeGenerationResult Generate(CanonicalSchemaDescriptor descriptor)
+    public SchemaCodeGenerationResult Generate(CanonicalSchemaDescriptor descriptor) =>
+        Generate(descriptor, catalogHash: null);
+
+    /// <summary>
+    /// Generates canonical artifacts and records the executable system-proto
+    /// catalog identity in the ownership manifest when supplied.
+    /// </summary>
+    public SchemaCodeGenerationResult Generate(
+        CanonicalSchemaDescriptor descriptor,
+        string? catalogHash)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
+        if (catalogHash is not null && !IsSha256(catalogHash))
+        {
+            throw new ArgumentException(
+                "Catalog hash must be a lower-case SHA-256 value.",
+                nameof(catalogHash));
+        }
 
         var allDefinitions = CollectDefinitions(descriptor, target: null);
         var allTypeNames = BuildTypeNames(descriptor, allDefinitions.Keys);
         var artifacts = ImmutableArray.CreateBuilder<GeneratedSchemaArtifact>();
         AddArtifact(
             artifacts,
-            "authoring/ExcelDbSchema.Authoring.g.cs",
+            "Authoring/ExcelDbSchema.Authoring.g.cs",
             "authoring-csharp",
             null,
             GenerateSurface(descriptor, null, allDefinitions, allTypeNames));
@@ -51,9 +67,10 @@ public sealed class SchemaCodeGenerator
             .ToArray();
         foreach (var target in targets)
         {
+            RequireSafeTargetId(target);
             var definitions = CollectDefinitions(descriptor, target);
             var safeTarget = SafeTargetIdentifier(target);
-            var prefix = $"runtime/{target}";
+            var prefix = $"Runtime/{target}";
             AddArtifact(
                 artifacts,
                 $"{prefix}/ExcelDbSchema.Runtime.{safeTarget}.g.cs",
@@ -72,11 +89,20 @@ public sealed class SchemaCodeGenerator
             .OrderBy(static artifact => artifact.RelativePath, StringComparer.Ordinal)
             .ToImmutableArray();
         var codegenHash = ComputeCodegenHash(ordered);
-        var manifestJson = BuildManifestJson(descriptor.SchemaHash, codegenHash, ordered);
+        var manifestJson = BuildManifestJson(
+            descriptor.SchemaHash,
+            codegenHash,
+            catalogHash,
+            ordered);
         var manifestHash = Sha256(manifestJson);
         return new SchemaCodeGenerationResult(
             ordered,
-            new SchemaArtifactManifest(descriptor.SchemaHash, codegenHash, manifestJson, manifestHash));
+            new SchemaArtifactManifest(
+                descriptor.SchemaHash,
+                codegenHash,
+                manifestJson,
+                manifestHash,
+                catalogHash));
     }
 
     private static string GenerateSurface(
@@ -908,13 +934,20 @@ public sealed class SchemaCodeGenerator
     private static string BuildManifestJson(
         ulong schemaHash,
         string codegenHash,
+        string? catalogHash,
         ImmutableArray<GeneratedSchemaArtifact> artifacts)
     {
         var builder = new StringBuilder();
         builder.Append("{\"format\":\"exceldb.codegen-manifest.v1\",\"schemaHash\":")
             .Append(JsonSerializer.Serialize(schemaHash.ToString("x16", CultureInfo.InvariantCulture)))
-            .Append(",\"codegenHash\":").Append(JsonSerializer.Serialize(codegenHash))
-            .Append(",\"artifacts\":[");
+            .Append(",\"codegenHash\":").Append(JsonSerializer.Serialize(codegenHash));
+        if (catalogHash is not null)
+        {
+            builder.Append(",\"catalogHash\":")
+                .Append(JsonSerializer.Serialize(catalogHash));
+        }
+
+        builder.Append(",\"artifacts\":[");
         for (var index = 0; index < artifacts.Length; index++)
         {
             if (index != 0)
@@ -932,6 +965,24 @@ public sealed class SchemaCodeGenerator
 
     private static string Sha256(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    private static bool IsSha256(string value) =>
+        value.Length == 64
+        && value.All(static character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static void RequireSafeTargetId(string target)
+    {
+        if (target.Length == 0
+            || target[0] is < 'a' or > 'z'
+            || target.Skip(1).Any(static character =>
+                character is not (>= 'a' and <= 'z')
+                && character is not (>= '0' and <= '9')
+                && character != '-'))
+        {
+            throw new InvalidDataException(
+                $"Export target cannot be used as a generated directory segment: '{target}'.");
+        }
+    }
 
     private static string ShortHash(string value) => Sha256(value)[..8];
 

@@ -70,22 +70,25 @@ public sealed class EditorServiceTests : IDisposable
     }
 
     [Fact]
-    public void SettingsProjectsExactlyFiveKeysWithoutEditorPrefsLayer()
+    public void SettingsProjectsExactlyFourArtifactFieldsWithoutEditorPrefsLayer()
     {
         var init = new ProjectInitializer("test").Plan(_root);
         new MutationPlanApplier().Apply(init);
         var file = Path.Combine(_root, ExcelDbProject.FileName);
         var service = new EditorProjectSettingsService("test");
         var before = service.Load(file, 10);
-        var changed = before with { SchemaDir = "Proto", BytesOutput = "Build/client.bytes" };
+        var changed = before with { SchemaDir = "Proto", ExcelDir = "Sheets" };
 
         var report = service.Save(file, changed);
 
         Assert.True(report.Succeeded);
         var project = ExcelDbProject.Load(file);
         Assert.Equal("Proto", project.SchemaDir);
-        Assert.Equal("Build/client.bytes", project.BytesOutput);
+        Assert.Equal("Sheets", project.ExcelDir);
+        Assert.Equal("Generated/CSharp", project.GeneratedCSharpDir);
+        Assert.Equal("Generated/Bytes", project.GeneratedBytesDir);
         Assert.Equal(5, System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(file)).RootElement.EnumerateObject().Count());
+        Assert.False(File.Exists(Path.Combine(_root, ".exceldb", ExcelDbProject.FileName)));
     }
 
     [Fact]
@@ -105,22 +108,30 @@ public sealed class EditorServiceTests : IDisposable
     }
 
     [Fact]
-    public void ProjectMountUsesSharedInitializerAndDiscoversConfiguredWorkbooks()
+    public void ProjectMountUsesSharedInitializerAndRecursivelyDiscoversExcelDirectory()
     {
         var service = new EditorProjectMountService("test");
         var plan = service.PlanInitialize(_root);
         Assert.Equal("init", plan.Operation);
         Assert.Equal(ExcelDbProject.Default.ToCanonicalJson(), Convert.FromBase64String(Assert.Single(plan.Mutations, item => item.RelativePath == ExcelDbProject.FileName).ContentBase64!));
         Assert.True(service.Initialize(_root).Succeeded);
-        var data = Path.Combine(_root, "Data");
-        File.WriteAllBytes(Path.Combine(data, "b.xlsx"), []);
-        File.WriteAllBytes(Path.Combine(data, "a.xlsx"), []);
+        var excel = Path.Combine(_root, "Excel");
+        var nested = Path.Combine(excel, "Nested");
+        Directory.CreateDirectory(nested);
+        File.WriteAllBytes(Path.Combine(excel, "b.xlsx"), []);
+        File.WriteAllBytes(Path.Combine(nested, "a.xlsx"), []);
+        File.WriteAllBytes(Path.Combine(excel, "~$temporary.xlsx"), []);
 
         var state = service.Inspect(Path.Combine(_root, ExcelDbProject.FileName));
 
         Assert.True(state.HasProject);
-        Assert.Equal([Path.Combine(data, "a.xlsx"), Path.Combine(data, "b.xlsx")], state.MountedWorkbooks.ToArray());
-        Assert.Empty(state.MissingPatterns);
+        Assert.Equal(excel, state.ExcelDirectory);
+        Assert.Equal(
+            new[] { Path.Combine(nested, "a.xlsx"), Path.Combine(excel, "b.xlsx") }.OrderBy(static path => path, StringComparer.Ordinal),
+            state.MountedWorkbooks);
+        Assert.Empty(state.Diagnostics);
+        if (OperatingSystem.IsWindows())
+            Assert.True(File.GetAttributes(Path.Combine(_root, ".exceldb")).HasFlag(FileAttributes.Hidden));
     }
 
     [Fact]
@@ -212,8 +223,11 @@ public sealed class EditorServiceTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(_root))
-            Directory.Delete(_root, recursive: true);
+        if (!Directory.Exists(_root))
+            return;
+        foreach (var file in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
+            File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
+        Directory.Delete(_root, recursive: true);
     }
 
     private sealed class RecordingConsole : IEditorConsole

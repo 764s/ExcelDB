@@ -278,7 +278,7 @@ exceldb diff [--schema-dir <dir>] <base.xlsx> <target.xlsx> [--json <path>]
 > 修改表结构, 并生产cs数据文件,
 > 生产cs文件的对应数据,
 
-**首次体验的最小闭环不是先要求用户搭 schema 工程,而是由可复制的单文件 exe 自举 Project,再以三个用户阶段收敛:`table create` 与可重复 `table edit` 在同一结构阶段维护仍为事实源的 proto,并把 proto、C# 类型投影与 xlsx 结构作为同一计划提交;用户填写 xlsx 后显式 `data prepare/check/convert` 产生与 generated registry SchemaHash 对应的 bytes+manifest。应用方写回与 Git diff 仍是独立工作流。**
+**历史裁决（其线性“三阶段”交互已由 D8 取代）：首次体验不先要求用户搭 schema 工程，而由可复制的单文件 exe 自举 Project；`table create` 与可重复 `table edit` 维护仍为事实源的 proto，并把 proto、C# 类型投影与 xlsx 结构作为同一计划提交；用户填写 xlsx 后显式 `data prepare/check/convert` 产生与 generated registry SchemaHash 对应的 bytes+manifest。应用方写回与 Git diff 仍是独立工作流。**
 
 落点:§1 主线与工件语义、§2 全景、WF1/WF2、§10-11;M1 D12 已同步向导维护 proto,M4 D10 已同步 self-contained 单文件、三阶段引导与 `init`/`table create`/`table edit`/`data prepare` 投影。
 
@@ -288,7 +288,7 @@ exceldb diff [--schema-dir <dir>] <base.xlsx> <target.xlsx> [--json <path>]
 
 > 另外允许表的字段声明为，服务端导出和客户端导出， 这一块也建议抽象为借口策略， 暂时这个策略仅关心前后端， 未来可能有简易前端之类的
 
-**使用者只勾选字段的客户端/服务端意图,`IExportTargetStrategy` 只在 create/edit 计划构造期补未显式项并把 effective target 集完整写进 proto；从此 build/codegen/convert/runtime 不再依赖策略。一个 convert 只产一个 target,因此 G1 安全地固定 client,server 与未来目标由 CI/发布显式转换、隔离包装。**
+**历史裁决（“首次入口只围绕 client”已由 D8 取代）：使用者只勾选字段的客户端/服务端意图，`IExportTargetStrategy` 只在 create/edit 计划构造期补未显式项并把 effective target 集完整写进 proto；从此 build/codegen/convert/runtime 不再依赖策略。一个 convert 仍只产一个显式 target，client、server 与未来目标均使用同一派生规则。**
 
 落点:§1 工件、§2 入口、WF1/WF2/WF5/WF7、§10-11；具体 CLI 五键与 target 参数归 M4 D12,策略与每 target runtime surface/codegen 归 M1。
 

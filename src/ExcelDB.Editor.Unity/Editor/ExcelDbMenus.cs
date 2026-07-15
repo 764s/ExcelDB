@@ -23,8 +23,8 @@ internal static class ExcelDbMenus
             bridge.SaveAll();
     }
 
-    [MenuItem("ExcelDB/Generate…", priority = 40)]
-    private static void Generate() => ExcelDbPlanWindow.ShowPlan("generate");
+    [MenuItem("ExcelDB/Regenerate…", priority = 40)]
+    private static void Regenerate() => ExcelDbPlanWindow.ShowPlan("generate");
 
     [MenuItem("ExcelDB/Normalize…", priority = 41)]
     private static void Normalize() => ExcelDbPlanWindow.ShowPlan("normalize");

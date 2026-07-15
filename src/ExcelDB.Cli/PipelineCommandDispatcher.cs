@@ -27,9 +27,11 @@ internal sealed class PipelineCommandDispatcher(
     };
 
     private readonly SchemaPipeline _schemas = new(toolVersion, builder.TableInitializer, builder.ExportTargetStrategy);
+    private readonly IExcelDbProjectService _projects = builder.CreateProjectService(toolVersion);
 
     public int Run(string command, string[] arguments) => command switch
     {
+        "project" => RunProject(arguments),
         "schema" => RunSchema(arguments),
         "table" => RunTable(arguments),
         "generate" => RunGenerate(arguments),
@@ -40,6 +42,108 @@ internal sealed class PipelineCommandDispatcher(
         "data" => RunData(arguments),
         _ => throw new ArgumentException($"Unknown command '{command}'."),
     };
+
+    private int RunProject(string[] arguments)
+    {
+        if (arguments.Length == 0)
+            throw new ArgumentException("project requires 'inspect', 'configure', 'repair-imports' or 'clean-cache'.");
+        return arguments[0] switch
+        {
+            "inspect" => RunProjectInspect(arguments[1..]),
+            "configure" => RunProjectConfigure(arguments[1..]),
+            "repair-imports" => RunProjectRepairImports(arguments[1..]),
+            "clean-cache" => RunProjectCleanCache(arguments[1..]),
+            _ => throw new ArgumentException("project requires 'inspect', 'configure', 'repair-imports' or 'clean-cache'."),
+        };
+    }
+
+    private int RunProjectInspect(string[] arguments)
+    {
+        var args = new CommandArguments(arguments);
+        var projectOption = args.TakeOption("--project");
+        var path = projectOption is null
+            ? ProjectLocator.LocateNearest(currentDirectory) is { Kind: not ProjectLocationKind.None } nearest
+                ? nearest.RootDirectory
+                : currentDirectory
+            : projectOption;
+        var json = args.TakeOption("--json");
+        args.RequireEmpty();
+        var location = ExcelDb.Pipeline.ProjectLocation.From(Path.GetFullPath(path, currentDirectory));
+        var inspection = _projects.Inspect(location);
+        console.WriteLine($"Project: {inspection.ProjectRoot}");
+        console.WriteLine($"Status: {inspection.Status}");
+        foreach (var artifact in new[]
+                 {
+                     inspection.Schema,
+                     inspection.Excel,
+                     inspection.GeneratedCSharp,
+                     inspection.GeneratedBytes,
+                 })
+        {
+            console.WriteLine($"  {artifact.Name}: {artifact.Status} ({artifact.ItemCount}) {artifact.Path}{(artifact.IsExternal ? " [external]" : string.Empty)}");
+        }
+        foreach (var diagnostic in inspection.Diagnostics)
+            WriteDiagnostic(diagnostic);
+        if (json is not null)
+        {
+            var output = Path.GetFullPath(json, currentDirectory);
+            AtomicFile.WriteAllBytes(output, [.. JsonSerializer.SerializeToUtf8Bytes(inspection, JsonOptions), (byte)'\n']);
+            console.WriteLine($"report: {output}");
+        }
+        // `project inspect` is an informational projection. A valid Project may
+        // legitimately need tables, regeneration, data preparation or bytes;
+        // `check` remains the CI/data gate for those states.
+        return inspection.Status is ProjectStatus.Legacy
+            or ProjectStatus.Invalid
+            or ProjectStatus.RecoveryRequired
+            ? (int)OperationExitCode.Blocker
+            : 0;
+    }
+
+    private int RunProjectConfigure(string[] arguments)
+    {
+        var args = new CommandArguments(arguments);
+        var planOptions = PlanOptions.Parse(args);
+        if (planOptions.ApplyPlan is not null)
+            return ApplyFrozenPlan("project-configure", args, planOptions);
+        var common = ProjectOptions.Parse(args, currentDirectory);
+        var generatedCSharp = args.TakeOption("--generated-csharp-dir");
+        var schema = args.TakeOption("--schema-dir");
+        var excel = args.TakeOption("--excel-dir");
+        var generatedBytes = args.TakeOption("--generated-bytes-dir");
+        args.RequireEmpty();
+        if (generatedCSharp is null && schema is null && excel is null && generatedBytes is null)
+            throw new ArgumentException("project configure requires at least one directory option.");
+        var plan = _projects.PlanConfigure(new ConfigureProjectRequest(
+            ExcelDb.Pipeline.ProjectLocation.From(common.Project.Context.RootDirectory),
+            schema,
+            excel,
+            generatedCSharp,
+            generatedBytes));
+        return ExecutePlan(plan, planOptions, common.JsonPath, prompt: true);
+    }
+
+    private int RunProjectRepairImports(string[] arguments)
+    {
+        var args = new CommandArguments(arguments);
+        var planOptions = PlanOptions.Parse(args);
+        if (planOptions.ApplyPlan is not null)
+            return ApplyFrozenPlan("project-repair-imports", args, planOptions);
+        var common = ProjectOptions.Parse(args, currentDirectory);
+        args.RequireEmpty();
+        var plan = _projects.PlanRepairSystemImports(new RepairSystemImportsRequest(
+            ExcelDb.Pipeline.ProjectLocation.From(common.Project.Context.RootDirectory)));
+        return ExecutePlan(plan, planOptions, common.JsonPath, prompt: true);
+    }
+
+    private int RunProjectCleanCache(string[] arguments)
+    {
+        var args = new CommandArguments(arguments);
+        var common = ProjectOptions.Parse(args, currentDirectory);
+        args.RequireEmpty();
+        var report = _projects.CleanCache(ExcelDb.Pipeline.ProjectLocation.From(common.Project.Context.RootDirectory));
+        return PresentReport(report, common.JsonPath);
+    }
 
     private int RunSchema(string[] arguments)
     {
@@ -74,7 +178,11 @@ internal sealed class PipelineCommandDispatcher(
         var args = new CommandArguments(arguments);
         var common = ProjectOptions.Parse(args, currentDirectory);
         args.RequireEmpty();
-        var outcome = new CompatibilityPipeline(toolVersion, _schemas, builder.CellFormats)
+        var outcome = new CompatibilityPipeline(
+                toolVersion,
+                _schemas,
+                builder.CellFormats,
+                builder.CreateWorkbookValidatorRegistry())
             .AnalyzeAsync(common.Project).GetAwaiter().GetResult();
         if (outcome.Report is null)
         {
@@ -107,7 +215,11 @@ internal sealed class PipelineCommandDispatcher(
         var completedHostMigrations = args.TakeOptions("--host-migrated");
         var common = ProjectOptions.Parse(args, currentDirectory);
         args.RequireEmpty();
-        var plan = new CompatibilityPipeline(toolVersion, _schemas, builder.CellFormats)
+        var plan = new CompatibilityPipeline(
+                toolVersion,
+                _schemas,
+                builder.CellFormats,
+                builder.CreateWorkbookValidatorRegistry())
             .CreatePublishPlanAsync(common.Project, completedHostMigrations).GetAwaiter().GetResult();
         return ExecutePlan(plan, planOptions, common.JsonPath, prompt: true);
     }
@@ -144,22 +256,31 @@ internal sealed class PipelineCommandDispatcher(
         {
             if (!console.IsInteractive)
                 throw new ArgumentException("table create requires --workbook in non-interactive mode.");
-            console.Write("Workbook [Data/game.xlsx]: ");
+            var defaultWorkbook = ProjectArtifactPaths.GetDefaultWorkbookPath(
+                common.Project.Context.RootDirectory,
+                common.Project.Context.ExcelDirectory);
+            console.Write($"Workbook [{defaultWorkbook}]: ");
             workbook = console.ReadLine();
             if (string.IsNullOrWhiteSpace(workbook))
-                workbook = "Data/game.xlsx";
+                workbook = defaultWorkbook;
         }
 
         var autoKeyFlag = args.TakeFlag("--auto-key");
         var key = args.TakeOption("--key");
         var fields = args.TakeOptions("--field").Select(ParseField).ToList();
+        var fieldKeyCount = fields.Count(static field => field.IsKey);
         if (key is not null)
         {
             if (autoKeyFlag)
                 throw new ArgumentException("--auto-key and --key cannot be combined.");
             fields.Add(ParseField(key) with { IsKey = true });
         }
-        var autoKey = key is null;
+        var explicitKeyCount = fieldKeyCount + (key is null ? 0 : 1);
+        if (explicitKeyCount > 1)
+            throw new ArgumentException("table create accepts exactly one explicit key field.");
+        if (autoKeyFlag && explicitKeyCount != 0)
+            throw new ArgumentException("--auto-key cannot be combined with an explicit ':key' field.");
+        var autoKey = explicitKeyCount == 0;
         var package = args.TakeOption("--package") ?? "game.configs";
         var proto = args.TakeOption("--proto");
         var tableIdText = args.TakeOption("--id");
@@ -183,7 +304,8 @@ internal sealed class PipelineCommandDispatcher(
             fieldTargets.ToImmutable(),
             tableTargets,
             proto);
-        var plan = _schemas.CreateTableAsync(common.Project, intent).GetAwaiter().GetResult();
+        var plan = _projects.PlanCreateTableAsync(
+            new CreateTableRequest(ExcelDb.Pipeline.ProjectLocation.From(common.Project.Context.RootDirectory), intent)).GetAwaiter().GetResult();
         return ExecutePlan(plan, planOptions, common.JsonPath, prompt: true);
     }
 
@@ -224,7 +346,8 @@ internal sealed class PipelineCommandDispatcher(
         if (!retire && additions.IsEmpty && renames.IsEmpty && removals.IsEmpty && newName is null && tableTargets is null && fieldTargets.Count == 0)
             throw new ArgumentException("table edit contains no requested change.");
         var intent = new TableEditIntent(tableName, additions, renames, removals, retire, newName, tableTargets, fieldTargets.ToImmutable(), workbook);
-        var plan = _schemas.EditTableAsync(common.Project, intent).GetAwaiter().GetResult();
+        var plan = _projects.PlanEditTableAsync(
+            new EditTableRequest(ExcelDb.Pipeline.ProjectLocation.From(common.Project.Context.RootDirectory), intent)).GetAwaiter().GetResult();
         return ExecutePlan(plan, planOptions, common.JsonPath, prompt: true);
     }
 
@@ -235,11 +358,9 @@ internal sealed class PipelineCommandDispatcher(
         if (planOptions.ApplyPlan is not null)
             return ApplyFrozenPlan("generate", args, planOptions);
         var common = ProjectOptions.Parse(args, currentDirectory);
-        var workbook = args.TakeOption("--workbook");
-        var purge = args.TakeFlag("--purge");
-        var rekey = args.TakeFlag("--rekey");
         args.RequireEmpty();
-        var plan = new WorkbookPipeline(toolVersion, _schemas, builder.CellFormats, builder.CreateWorkbookValidatorRegistry()).GenerateAsync(common.Project, workbook, purge, rekey).GetAwaiter().GetResult();
+        var plan = _projects.PlanRegenerateAsync(
+            new RegenerateRequest(ExcelDb.Pipeline.ProjectLocation.From(common.Project.Context.RootDirectory))).GetAwaiter().GetResult();
         return ExecutePlan(plan, planOptions, common.JsonPath, prompt: true);
     }
 
@@ -267,7 +388,8 @@ internal sealed class PipelineCommandDispatcher(
         var common = ProjectOptions.Parse(args, currentDirectory);
         var workbook = args.TakeOption("--workbook");
         args.RequireEmpty();
-        var plan = new WorkbookPipeline(toolVersion, _schemas, builder.CellFormats, builder.CreateWorkbookValidatorRegistry()).DataPrepareAsync(common.Project, workbook).GetAwaiter().GetResult();
+        var plan = _projects.PlanDataPrepareAsync(
+            new DataPrepareRequest(ExcelDb.Pipeline.ProjectLocation.From(common.Project.Context.RootDirectory), workbook)).GetAwaiter().GetResult();
         return ExecutePlan(plan, planOptions, common.JsonPath, prompt: true);
     }
 
@@ -277,8 +399,9 @@ internal sealed class PipelineCommandDispatcher(
         var common = ProjectOptions.Parse(args, currentDirectory);
         var workbook = args.TakeOption("--workbook");
         args.RequireEmpty();
-        var outcome = new WorkbookPipeline(toolVersion, _schemas, builder.CellFormats, builder.CreateWorkbookValidatorRegistry()).CheckAsync(common.Project, workbook).GetAwaiter().GetResult();
-        return PresentReport(outcome.Report with { ToolVersion = toolVersion }, common.JsonPath);
+        var report = _projects.CheckAsync(
+            new CheckRequest(ExcelDb.Pipeline.ProjectLocation.From(common.Project.Context.RootDirectory), workbook)).GetAwaiter().GetResult();
+        return PresentReport(report, common.JsonPath);
     }
 
     private int RunConvert(string[] arguments)
@@ -290,11 +413,13 @@ internal sealed class PipelineCommandDispatcher(
             throw new ArgumentException("convert accepts exactly one explicit target; 'all' and target lists are not supported.");
         var output = args.TakeOption("--out");
         var workbook = args.TakeOption("--workbook");
-        if (output is null && !string.Equals(target, "client", StringComparison.Ordinal))
-            throw new ArgumentException("A non-client convert requires an explicit --out path.");
         output ??= WorkbookPipeline.DefaultOutputPath(common.Project, target);
         args.RequireEmpty();
-        var report = new WorkbookPipeline(toolVersion, _schemas, builder.CellFormats, builder.CreateWorkbookValidatorRegistry()).ConvertAsync(common.Project, target, output, workbook).GetAwaiter().GetResult();
+        var report = _projects.ConvertAsync(new ConvertRequest(
+            ExcelDb.Pipeline.ProjectLocation.From(common.Project.Context.RootDirectory),
+            target,
+            output,
+            workbook)).GetAwaiter().GetResult();
         return PresentReport(report, common.JsonPath);
     }
 
@@ -345,7 +470,7 @@ internal sealed class PipelineCommandDispatcher(
                 return 0;
             }
         }
-        return PresentReport(new MutationPlanApplier().Apply(plan), jsonPath);
+        return PresentReport(_projects.Apply(plan), jsonPath);
     }
 
     private int ApplyFrozenPlan(string expectedOperation, CommandArguments args, PlanOptions options) =>
@@ -358,7 +483,7 @@ internal sealed class PipelineCommandDispatcher(
         var plan = MutationPlanCodec.Deserialize(File.ReadAllBytes(path));
         if (!expectedOperations.Contains(plan.Operation, StringComparer.Ordinal))
             throw new ArgumentException($"Plan operation '{plan.Operation}' does not match this command.");
-        return PresentReport(new MutationPlanApplier().Apply(plan), null);
+        return PresentReport(_projects.Apply(plan), null);
     }
 
     private int PresentReport(OperationReport report, string? jsonPath)
@@ -381,17 +506,30 @@ internal sealed class PipelineCommandDispatcher(
     {
         console.WriteLine($"Operation: {plan.Operation}");
         console.WriteLine($"Project: {plan.ProjectRoot}");
+        if (IsExternalRoot(plan.ProjectRoot, plan.GeneratedCSharpRoot))
+            console.WriteLine($"Generated C#: {plan.GeneratedCSharpRoot} (external root)");
         console.WriteLine($"Plan: {plan.PlanHash}");
         foreach (var risk in plan.Risks)
             console.WriteLine($"  risk: {risk}");
         foreach (var mutation in plan.Mutations)
-            console.WriteLine($"  {mutation.Kind}: {mutation.RelativePath}");
+            console.WriteLine($"  [{mutation.Root}] {mutation.Kind}: {mutation.RelativePath}");
         foreach (var diagnostic in plan.Diagnostics)
             WriteDiagnostic(diagnostic);
     }
 
     private void WriteDiagnostic(Diagnostic diagnostic) =>
         console.WriteLine($"{diagnostic.Severity.ToString().ToLowerInvariant()} {diagnostic.Code} {diagnostic.Location}: {diagnostic.Message}");
+
+    private static bool IsExternalRoot(string projectRoot, string? candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate))
+            return false;
+        var relative = Path.GetRelativePath(Path.GetFullPath(projectRoot), Path.GetFullPath(candidate));
+        return Path.IsPathFullyQualified(relative)
+               || relative == ".."
+               || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+               || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);
+    }
 
     private static SimpleFieldDefinition ParseField(string value)
     {
@@ -468,23 +606,31 @@ internal sealed class PipelineCommandDispatcher(
         public static ProjectOptions Parse(CommandArguments args, string currentDirectory)
         {
             var projectOption = args.TakeOption("--project");
-            var schemaOverride = args.TakeOption("--schema-dir");
-            var workbookOverrides = args.TakeOptions("--workbooks");
             var json = args.TakeOption("--json");
-            var projectFile = projectOption is null
-                ? ProjectLocator.FindNearest(currentDirectory)
-                : ResolveProjectFile(Path.GetFullPath(projectOption, currentDirectory));
+            string? projectFile;
+            if (projectOption is null)
+            {
+                var nearest = ProjectLocator.LocateNearest(currentDirectory);
+                if (nearest.Kind == ProjectLocationKind.LegacyV1)
+                    throw new ArgumentException("The nearest project is legacy v1; reinitialize Project v2. Automatic migration is unavailable.");
+                if (nearest.Kind == ProjectLocationKind.Conflicted)
+                    throw new ArgumentException("The nearest project contains both legacy v1 and Project v2 configuration; remove the ambiguity first.");
+                projectFile = nearest.Kind == ProjectLocationKind.ProjectV2 ? nearest.ProjectFilePath : null;
+            }
+            else
+            {
+                projectFile = ResolveProjectFile(Path.GetFullPath(projectOption, currentDirectory));
+            }
             if (projectFile is null)
-                throw new ArgumentException("No ExcelDb.Project.json was found; run init first or pass --project.");
-            var project = PipelineProject.Load(
-                projectFile,
-                schemaOverride,
-                workbookOverrides.Length == 0 ? null : workbookOverrides.ToImmutableArray());
+                throw new ArgumentException("No .exceldb/project.json was found; run init first or pass --project.");
+            var project = PipelineProject.Load(projectFile);
             var jsonPath = json is null ? null : project.Context.ResolvePath(json);
             return new ProjectOptions(project, jsonPath);
         }
 
-        private static string ResolveProjectFile(string path) => Directory.Exists(path) ? Path.Combine(path, ExcelDbProject.FileName) : path;
+        private static string ResolveProjectFile(string path) => Directory.Exists(path)
+            ? Path.Combine(path, ExcelDbProject.RelativeFilePath)
+            : path;
     }
 
     private sealed class CommandArguments

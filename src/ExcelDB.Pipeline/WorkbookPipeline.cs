@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using ExcelDb.Core.Diagnostics;
 using ExcelDb.Core.Identity;
 using ExcelDb.Core.IO;
@@ -10,6 +11,7 @@ using ExcelDb.Runtime.Bytes;
 using ExcelDb.Schema.Descriptors;
 using ExcelDb.Schema.Generation;
 using ExcelDb.Tooling.Plans;
+using ExcelDb.Tooling.Project;
 using ExcelDb.Workbooks.Formatting;
 using ExcelDb.Workbooks.Identity;
 using ExcelDb.Workbooks.Importing;
@@ -25,6 +27,8 @@ public sealed class WorkbookPipeline
     private readonly SchemaPipeline _schemas;
     private readonly CellFormatRegistry _cellFormats;
     private readonly WorkbookValidatorRegistry _validators;
+
+    internal Action? BeforeExternalInputRevalidation { get; set; }
 
     public WorkbookPipeline(
         string toolVersion,
@@ -44,13 +48,183 @@ public sealed class WorkbookPipeline
         ArgumentNullException.ThrowIfNull(project);
         if (!ExportTargetId.TryParse(target, out _))
             throw new ArgumentException($"Invalid export target '{target}'.", nameof(target));
-        var client = project.Context.BytesOutputPath;
-        if (string.Equals(target, "client", StringComparison.Ordinal))
-            return client;
-        var directory = Path.GetDirectoryName(client) ?? project.Context.RootDirectory;
-        var extension = Path.GetExtension(client);
-        var stem = Path.GetFileNameWithoutExtension(client);
-        return Path.Combine(directory, $"{stem}.{target}{extension}");
+        return project.Context.GetBytesOutputPath(target);
+    }
+
+    internal IReadOnlyDictionary<string, ConvertedBytesPackage> BuildExpectedBytePackages(
+        PipelineProject project,
+        CanonicalSchemaDescriptor schema,
+        IEnumerable<string> workbookPaths,
+        ICollection<Diagnostic> diagnostics,
+        InputSetObservation? frozenExcelInputs = null)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(schema);
+        ArgumentNullException.ThrowIfNull(workbookPaths);
+        ArgumentNullException.ThrowIfNull(diagnostics);
+
+        var projectionDiagnostics = new List<Diagnostic>();
+        var imports = new List<WorkbookImportResult>();
+        var domainEntries = new List<WorkbookImportDomainEntry>();
+        foreach (var path in workbookPaths
+                     .Select(Path.GetFullPath)
+                     .Distinct(StringComparer.OrdinalIgnoreCase)
+                     .Order(StringComparer.Ordinal))
+        {
+            try
+            {
+                var bytes = File.ReadAllBytes(path);
+                if (frozenExcelInputs is not null)
+                    EnsureWorkbookBytesMatchSnapshot(project, frozenExcelInputs, path, bytes);
+                var inspection = XlsxWorkbookCodec.Inspect(bytes, schema);
+                projectionDiagnostics.AddRange(inspection.Diagnostics);
+                if (inspection.Diagnostics.Any(static diagnostic => diagnostic.IsFailure))
+                    continue;
+                var imported = WorkbookImporter.Import(
+                    path,
+                    bytes,
+                    inspection.Workbook,
+                    schema,
+                    cellFormats: _cellFormats,
+                    validators: _validators);
+                projectionDiagnostics.AddRange(imported.Diagnostics);
+                imports.Add(imported);
+                domainEntries.Add(new WorkbookImportDomainEntry(path, imported));
+            }
+            catch (Exception exception) when (exception is IOException
+                                               or UnauthorizedAccessException
+                                               or InvalidDataException)
+            {
+                projectionDiagnostics.Add(new Diagnostic(
+                    "workbook.invalid",
+                    DiagnosticSeverity.Error,
+                    path,
+                    exception.Message));
+            }
+        }
+
+        projectionDiagnostics.AddRange(WorkbookImportDomain.Validate(domainEntries));
+        if (projectionDiagnostics.Any(static diagnostic => diagnostic.IsFailure))
+        {
+            AddProjectionDiagnostics(diagnostics, projectionDiagnostics);
+            return ImmutableDictionary<string, ConvertedBytesPackage>.Empty;
+        }
+
+        var allRows = imports.SelectMany(static import => import.Rows).ToArray();
+        var packages = ImmutableDictionary.CreateBuilder<string, ConvertedBytesPackage>(StringComparer.Ordinal);
+        foreach (var targetText in schema.Tables
+                     .Where(static table => table.Kind == CanonicalTableKind.Asset)
+                     .SelectMany(static table => table.ExportTargets)
+                     .Distinct(StringComparer.Ordinal)
+                     .Order(StringComparer.Ordinal))
+        {
+            if (!ExportTargetId.TryParse(targetText, out var target))
+            {
+                projectionDiagnostics.Add(new Diagnostic(
+                    "schema.target-invalid",
+                    DiagnosticSeverity.Blocker,
+                    targetText,
+                    "The compiled schema contains an invalid export target id."));
+                continue;
+            }
+
+            var targetSchema = schema with
+            {
+                Tables = schema.Tables
+                    .Where(table => table.ExportTargets.Contains(targetText, StringComparer.Ordinal))
+                    .ToImmutableArray(),
+            };
+            var records = new List<RuntimeAssetRecord>();
+            foreach (var imported in imports)
+            {
+                foreach (var row in imported.Rows.Where(static row => row.IsIndexable && row.Identity is not null))
+                {
+                    var table = schema.Tables.Single(item => item.Id == row.TableId);
+                    if (!table.ExportTargets.Contains(targetText, StringComparer.Ordinal))
+                        continue;
+
+                    var fields = ImmutableArray.CreateBuilder<RuntimeFieldValue>();
+                    var dependencies = new HashSet<AssetIdentity>();
+                    foreach (var field in Flatten(table.Fields)
+                                 .Where(candidate => candidate.ExportTargets.Contains(targetText, StringComparer.Ordinal))
+                                 .OrderBy(static field => FieldPathKey(field), StringComparer.Ordinal))
+                    {
+                        if (!row.Values.TryGetValue(field.PropertyPath, out var value)
+                            || value.State is not (CanonicalValueState.Value or CanonicalValueState.Defaulted))
+                        {
+                            continue;
+                        }
+
+                        if (IsRowReference(field))
+                        {
+                            var resolution = RowReferenceResolver.Resolve(field, value.Text!, targetSchema, allRows);
+                            if (!resolution.Succeeded)
+                            {
+                                projectionDiagnostics.Add(new Diagnostic(
+                                    "ref.unresolved",
+                                    DiagnosticSeverity.Blocker,
+                                    $"{row.Location}:{field.PropertyPath}",
+                                    resolution.Error!));
+                                continue;
+                            }
+
+                            dependencies.Add(resolution.Identity);
+                            fields.Add(new RuntimeFieldValue(
+                                EffectiveFieldPath(field),
+                                Encoding.UTF8.GetBytes(resolution.Identity.ToString())));
+                            continue;
+                        }
+
+                        fields.Add(new RuntimeFieldValue(
+                            EffectiveFieldPath(field),
+                            Encoding.UTF8.GetBytes(value.Text!)));
+                    }
+
+                    records.Add(new RuntimeAssetRecord(
+                        row.Identity!.Value,
+                        row.Key ?? string.Empty,
+                        fields,
+                        dependencies.OrderBy(static identity => identity.TableId)
+                            .ThenBy(static identity => identity.RowGuid.ToString(), StringComparer.Ordinal),
+                        $"{table.Name}/{row.Key}"));
+                }
+            }
+
+            if (projectionDiagnostics.Any(static diagnostic => diagnostic.IsFailure))
+                continue;
+            try
+            {
+                var contentHash = ComputeTargetContentHash(schema.SchemaHash, target, records);
+                using var snapshot = new SourceSnapshot(
+                    schema.SchemaHash,
+                    target,
+                    contentHash[..16],
+                    contentHash,
+                    records);
+                packages[targetText] = ConvertedBytesWriter.Build(snapshot, _toolVersion);
+            }
+            catch (InvalidDataException exception)
+            {
+                projectionDiagnostics.Add(new Diagnostic(
+                    "bytes.source-invalid",
+                    DiagnosticSeverity.Blocker,
+                    targetText,
+                    exception.Message));
+            }
+        }
+
+        AddProjectionDiagnostics(diagnostics, projectionDiagnostics);
+        return projectionDiagnostics.Any(static diagnostic => diagnostic.IsFailure)
+            ? ImmutableDictionary<string, ConvertedBytesPackage>.Empty
+            : packages.ToImmutable();
+    }
+
+    private static void AddProjectionDiagnostics(
+        ICollection<Diagnostic> destination,
+        IEnumerable<Diagnostic> source)
+    {
+        foreach (var diagnostic in source)
+            destination.Add(diagnostic);
     }
 
     public async Task<MutationPlan> GenerateAsync(
@@ -63,16 +237,47 @@ public sealed class WorkbookPipeline
         var diagnostics = new List<Diagnostic>();
         var schema = await _schemas.CompileAsync(project, diagnostics, cancellationToken).ConfigureAwait(false);
         var builder = _schemas.CreatePlanBuilder(project, "generate", schema?.Descriptor.SchemaHash ?? 0);
-        SchemaPipeline.ObserveSchemaInputs(builder, project);
-        if (schema is null || !CheckGeneratedFresh(project, schema.Descriptor, diagnostics))
+        _schemas.ObserveSchemaInputs(builder, project, schema);
+        var excelInputs = SchemaPipeline.CaptureExcelInputs(project);
+        SchemaPipeline.ObserveExcelInputs(builder, project, excelInputs);
+        if (purge || rekey)
+        {
+            diagnostics.Add(new Diagnostic(
+                "generate.option-retired",
+                DiagnosticSeverity.Blocker,
+                "generate",
+                "Project v2 generate always preserves business cells and identities; --purge and --rekey are no longer part of regenerate."));
+        }
+        if (schema is null || diagnostics.Any(static diagnostic => diagnostic.IsBlocker))
         {
             foreach (var diagnostic in diagnostics)
                 builder.AddDiagnostic(diagnostic);
             return builder.Build();
         }
 
-        var workbooks = SchemaPipeline.ResolveWorkbooks(project, workbookPath).ToArray();
-        if (workbookPath is not null && workbooks.Length == 1 && !File.Exists(workbooks[0]))
+        _schemas.AddSystemProtoMirrorMutations(builder, project, explicitRepair: false);
+        _schemas.AddGeneratedArtifacts(
+            builder,
+            project,
+            new SchemaCodeGenerator().Generate(schema.Descriptor, _schemas.SystemProtoCatalog.CatalogHash),
+            checkOnly: false,
+            diagnostics);
+        SchemaPipeline.AddDescriptorCache(builder, project, schema);
+
+        var effectiveWorkbookPath = workbookPath;
+        var workbooks = SchemaPipeline.ResolveWorkbooks(project, effectiveWorkbookPath).ToArray();
+        if (effectiveWorkbookPath is null
+            && schema.Descriptor.Tables.Any(static table => table.Kind == CanonicalTableKind.Asset)
+            && workbooks.Length == 0)
+        {
+            effectiveWorkbookPath = ProjectArtifactPaths.GetDefaultWorkbookPath(
+                project.Context.RootDirectory,
+                project.Context.ExcelDirectory);
+            workbooks = SchemaPipeline.ResolveWorkbooks(project, effectiveWorkbookPath).ToArray();
+        }
+        foreach (var workbook in workbooks)
+            builder.Observe(workbook);
+        if (effectiveWorkbookPath is not null && workbooks.Length == 1 && !File.Exists(workbooks[0]))
         {
             var definition = new WorkbookDefinition(
                 DeterministicGuid(workbooks[0]),
@@ -94,6 +299,7 @@ public sealed class WorkbookPipeline
                 try
                 {
                     var sourceBytes = File.ReadAllBytes(workbook);
+                    EnsureWorkbookBytesMatchSnapshot(project, excelInputs, workbook, sourceBytes);
                     var inspection = XlsxWorkbookCodec.Inspect(sourceBytes, schema.Descriptor);
                     var physical = inspection.Workbook;
                     if (inspection.HasDrift)
@@ -151,10 +357,6 @@ public sealed class WorkbookPipeline
 
         foreach (var diagnostic in diagnostics)
             builder.AddDiagnostic(diagnostic);
-        if (purge)
-            builder.AddRisk("purge-unmanaged-structure");
-        if (rekey)
-            builder.AddRisk("recompute-business-keys-and-reference-tokens");
         return builder.Build();
     }
 
@@ -166,7 +368,9 @@ public sealed class WorkbookPipeline
         var diagnostics = new List<Diagnostic>();
         var schema = await _schemas.CompileAsync(project, diagnostics, cancellationToken).ConfigureAwait(false);
         var builder = _schemas.CreatePlanBuilder(project, "normalize", schema?.Descriptor.SchemaHash ?? 0);
-        SchemaPipeline.ObserveSchemaInputs(builder, project);
+        _schemas.ObserveSchemaInputs(builder, project, schema);
+        var excelInputs = SchemaPipeline.CaptureExcelInputs(project);
+        SchemaPipeline.ObserveExcelInputs(builder, project, excelInputs);
         if (schema is null || !CheckGeneratedFresh(project, schema.Descriptor, diagnostics))
         {
             foreach (var diagnostic in diagnostics)
@@ -179,6 +383,7 @@ public sealed class WorkbookPipeline
             try
             {
                 var bytes = File.ReadAllBytes(workbook);
+                EnsureWorkbookBytesMatchSnapshot(project, excelInputs, workbook, bytes);
                 var inspection = XlsxWorkbookCodec.Inspect(bytes, schema.Descriptor);
                 foreach (var diagnostic in inspection.Diagnostics)
                     diagnostics.Add(diagnostic);
@@ -212,7 +417,9 @@ public sealed class WorkbookPipeline
         var diagnostics = new List<Diagnostic>();
         var schema = await _schemas.CompileAsync(project, diagnostics, cancellationToken).ConfigureAwait(false);
         var builder = _schemas.CreatePlanBuilder(project, "data-prepare", schema?.Descriptor.SchemaHash ?? 0);
-        SchemaPipeline.ObserveSchemaInputs(builder, project);
+        _schemas.ObserveSchemaInputs(builder, project, schema);
+        var excelInputs = SchemaPipeline.CaptureExcelInputs(project);
+        SchemaPipeline.ObserveExcelInputs(builder, project, excelInputs);
         if (schema is null || !CheckGeneratedFresh(project, schema.Descriptor, diagnostics))
         {
             foreach (var diagnostic in diagnostics)
@@ -220,7 +427,7 @@ public sealed class WorkbookPipeline
             return builder.Build();
         }
 
-        var sources = ReadSources(project, workbookPath, schema.Descriptor, diagnostics);
+        var sources = ReadSources(project, workbookPath, schema.Descriptor, diagnostics, excelInputs);
         if (diagnostics.Any(static item => item.IsFailure))
         {
             foreach (var diagnostic in diagnostics)
@@ -242,7 +449,9 @@ public sealed class WorkbookPipeline
                 if (selected.Length == 0)
                     continue;
                 var patches = BuildIdentityPatches(source, selected);
-                var updated = XlsxWorkbookCodec.PatchCells(File.ReadAllBytes(source.Path), patches);
+                var currentBytes = File.ReadAllBytes(source.Path);
+                EnsureWorkbookBytesMatchSnapshot(project, excelInputs, source.Path, currentBytes);
+                var updated = XlsxWorkbookCodec.PatchCells(currentBytes, patches);
                 SchemaPipeline.WriteIfChanged(builder, source.Path, updated);
                 builder.AddRisk($"pending-identities={selected.Length}:{SchemaPipeline.Relative(project, source.Path)}");
             }
@@ -257,16 +466,18 @@ public sealed class WorkbookPipeline
         PipelineProject project,
         string? workbookPath = null,
         bool pendingIsBlocker = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        InputSetObservation? frozenExcelInputs = null)
     {
         var diagnostics = new List<Diagnostic>();
         var schema = await _schemas.CompileAsync(project, diagnostics, cancellationToken).ConfigureAwait(false);
         if (schema is null)
             return BuildCheck(project, diagnostics, null, [], 0);
         CheckGeneratedFresh(project, schema.Descriptor, diagnostics);
-        var sources = ReadSources(project, workbookPath, schema.Descriptor, diagnostics);
+        var excelInputs = frozenExcelInputs ?? SchemaPipeline.CaptureExcelInputs(project);
+        var sources = ReadSources(project, workbookPath, schema.Descriptor, diagnostics, excelInputs);
         if (sources.Count == 0 && schema.Descriptor.Tables.Any(static table => table.Kind == CanonicalTableKind.Asset))
-            diagnostics.Add(new Diagnostic("workbook.missing", DiagnosticSeverity.Error, project.Context.Project.Workbooks[0], "No workbook matches the Project configuration."));
+            diagnostics.Add(new Diagnostic("workbook.missing", DiagnosticSeverity.Error, project.Context.Project.ExcelDir, "No workbook exists below Project v2 excelDir."));
 
         var scan = new ProjectIdentityScanner().Scan(sources);
         diagnostics.AddRange(scan.Diagnostics);
@@ -310,127 +521,334 @@ public sealed class WorkbookPipeline
     {
         if (!ExportTargetId.TryParse(target, out var exportTarget))
             throw new ArgumentException($"Invalid export target '{target}'.", nameof(target));
-        var check = await CheckAsync(project, workbookPath, pendingIsBlocker: true, cancellationToken).ConfigureAwait(false);
-        if (check.Schema is null || !check.Report.Succeeded)
-            return check.Report with { Operation = "convert" };
-        var schema = check.Schema.Descriptor;
-        if (!schema.Tables.Any(table => table.ExportTargets.Contains(target, StringComparer.Ordinal)))
+        var fullOutput = project.Context.ResolvePath(outputPath);
+        var manifestPath = fullOutput + ".manifest.json";
+        var isExternalOutput = !IsContained(project.Context.RootDirectory, fullOutput);
+        var protectedRoots = new[]
+        {
+            (Name: "Schema", Path: project.Context.SchemaDirectory),
+            (Name: "Excel", Path: project.Context.ExcelDirectory),
+            (Name: "Generated C#", Path: project.Context.GeneratedCSharpDirectory),
+            (Name: ".exceldb", Path: project.Context.InternalDirectory),
+            (Name: "project configuration", Path: project.Context.ProjectFilePath),
+        };
+        var protectedRoot = protectedRoots.FirstOrDefault(root =>
+            PathsOverlap(root.Path, fullOutput) || PathsOverlap(root.Path, manifestPath));
+        if (protectedRoot.Path is not null)
         {
             return new OperationReport(
                 "convert",
                 _toolVersion,
                 false,
-                [new Diagnostic("target.unknown", DiagnosticSeverity.Blocker, target, "Export target is not declared by the current schema.")],
+                [new Diagnostic(
+                    "convert.output-reserved",
+                    DiagnosticSeverity.Blocker,
+                    fullOutput,
+                    $"The bytes output and its manifest must not overlap the protected {protectedRoot.Name} path '{protectedRoot.Path}'. Project-internal one-off paths outside protected roots are allowed.")],
                 []);
         }
-
-        var diagnostics = new List<Diagnostic>();
-        var records = new List<RuntimeAssetRecord>();
-        var imports = new List<WorkbookImportResult>();
-        var importDomainEntries = new List<WorkbookImportDomainEntry>();
-        foreach (var path in check.WorkbookPaths)
+        ProjectOperationLease? externalLease = null;
+        if (isExternalOutput)
         {
-            var bytes = File.ReadAllBytes(path);
-            var inspection = XlsxWorkbookCodec.Inspect(bytes, schema);
-            diagnostics.AddRange(inspection.Diagnostics);
-            if (inspection.Diagnostics.Any(static item => item.IsFailure))
-                continue;
-            var workbook = inspection.Workbook;
-            var imported = WorkbookImporter.Import(path, bytes, workbook, schema, cellFormats: _cellFormats, validators: _validators);
-            diagnostics.AddRange(imported.Diagnostics);
-            imports.Add(imported);
-            importDomainEntries.Add(new WorkbookImportDomainEntry(path, imported));
-        }
-
-        var allRows = imports.SelectMany(static import => import.Rows).ToArray();
-        diagnostics.AddRange(WorkbookImportDomain.Validate(importDomainEntries));
-        var targetSchema = schema with
-        {
-            Tables = schema.Tables
-                .Where(table => table.ExportTargets.Contains(target, StringComparer.Ordinal))
-                .ToImmutableArray(),
-        };
-        foreach (var imported in imports)
-        {
-            foreach (var row in imported.Rows.Where(static row => row.IsIndexable && row.Identity is not null))
+            try
             {
-                var table = schema.Tables.Single(item => item.Id == row.TableId);
-                if (!table.ExportTargets.Contains(target, StringComparer.Ordinal))
-                    continue;
-                var fields = ImmutableArray.CreateBuilder<RuntimeFieldValue>();
-                var dependencies = new HashSet<AssetIdentity>();
-                foreach (var field in Flatten(table.Fields)
-                             .Where(field => field.ExportTargets.Contains(target, StringComparer.Ordinal))
-                             .OrderBy(static field => FieldPathKey(field), StringComparer.Ordinal))
-                {
-                    if (!row.Values.TryGetValue(field.PropertyPath, out var value)
-                        || value.State is not (CanonicalValueState.Value or CanonicalValueState.Defaulted))
-                        continue;
-
-                    if (IsRowReference(field))
-                    {
-                        var resolution = RowReferenceResolver.Resolve(field, value.Text!, targetSchema, allRows);
-                        if (!resolution.Succeeded)
-                        {
-                            diagnostics.Add(new Diagnostic(
-                                "ref.unresolved",
-                                DiagnosticSeverity.Blocker,
-                                $"{row.Location}:{field.PropertyPath}",
-                                resolution.Error!));
-                            continue;
-                        }
-
-                        dependencies.Add(resolution.Identity);
-                        fields.Add(new RuntimeFieldValue(
-                            EffectiveFieldPath(field),
-                            Encoding.UTF8.GetBytes(resolution.Identity.ToString())));
-                        continue;
-                    }
-
-                    fields.Add(new RuntimeFieldValue(EffectiveFieldPath(field), Encoding.UTF8.GetBytes(value.Text!)));
-                }
-
-                records.Add(new RuntimeAssetRecord(
-                    row.Identity!.Value,
-                    row.Key ?? string.Empty,
-                    fields,
-                    dependencies.OrderBy(static item => item.TableId)
-                        .ThenBy(static item => item.RowGuid.ToString(), StringComparer.Ordinal),
-                    $"{table.Name}/{row.Key}"));
+                externalLease = ProjectRecovery.AcquireLeaseForOperation(
+                    project.Context.RootDirectory,
+                    [Path.GetDirectoryName(fullOutput)!]);
+            }
+            catch (ProjectBusyException exception)
+            {
+                return new OperationReport(
+                    "convert",
+                    _toolVersion,
+                    false,
+                    [new Diagnostic("project.busy", DiagnosticSeverity.Blocker, project.Context.RootDirectory, exception.Message)],
+                    []);
+            }
+            catch (Exception exception) when (exception is IOException
+                                               or UnauthorizedAccessException
+                                               or InvalidDataException)
+            {
+                return new OperationReport(
+                    "convert",
+                    _toolVersion,
+                    false,
+                    [new Diagnostic("convert.external-write", DiagnosticSeverity.Blocker, fullOutput, exception.Message)],
+                    []);
             }
         }
 
-        if (diagnostics.Any(static item => item.IsFailure))
-            return new OperationReport("convert", _toolVersion, false, diagnostics.ToImmutableArray(), []);
-
-        var contentHash = ComputeTargetContentHash(schema.SchemaHash, exportTarget, records);
-        using var snapshot = new SourceSnapshot(schema.SchemaHash, exportTarget, contentHash[..16], contentHash, records);
-        ConvertedBytesPackage package;
         try
         {
-            package = ConvertedBytesWriter.Build(snapshot, _toolVersion);
-        }
-        catch (InvalidDataException exception)
-        {
-            return new OperationReport("convert", _toolVersion, false, [new Diagnostic("convert.invalid", DiagnosticSeverity.Blocker, outputPath, exception.Message)], []);
-        }
+            if (isExternalOutput)
+            {
+                var recovery = ProjectRecovery.RecoverPendingUnderLease(project.Context.RootDirectory);
+                if (!recovery.Succeeded)
+                    return recovery with { Operation = "convert", ToolVersion = _toolVersion };
+                try
+                {
+                    var currentProject = ExcelDbProject.Load(project.Context.ProjectFilePath);
+                    var currentContext = currentProject.Resolve(project.Context.ProjectFilePath);
+                    var currentHash = ContentFingerprint.FromBytes(currentProject.ToCanonicalJson()).Sha256;
+                    if (!string.Equals(currentHash, project.ConfigHash, StringComparison.Ordinal)
+                        || !string.Equals(
+                            Path.GetFullPath(currentContext.RootDirectory),
+                            Path.GetFullPath(project.Context.RootDirectory),
+                            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    {
+                        return new OperationReport(
+                            "convert",
+                            _toolVersion,
+                            false,
+                            [new Diagnostic(
+                            "plan.stale",
+                            DiagnosticSeverity.Blocker,
+                            ExcelDbProject.RelativeFilePath,
+                            "Project configuration changed while waiting for the project lease; retry convert with the current project settings.")],
+                            []);
+                    }
+                }
+                catch (Exception exception) when (exception is IOException
+                                                   or UnauthorizedAccessException
+                                                   or InvalidDataException
+                                                   or JsonException)
+                {
+                    return new OperationReport(
+                        "convert",
+                        _toolVersion,
+                        false,
+                        [new Diagnostic("plan.stale", DiagnosticSeverity.Blocker, ExcelDbProject.RelativeFilePath, exception.Message)],
+                        []);
+                }
+            }
+            var excelInputs = SchemaPipeline.CaptureExcelInputs(project);
+            var check = await CheckAsync(
+                    project,
+                    workbookPath,
+                    pendingIsBlocker: true,
+                    cancellationToken,
+                    excelInputs)
+                .ConfigureAwait(false);
+            if (check.Schema is null || !check.Report.Succeeded)
+                return check.Report with { Operation = "convert" };
+            var schema = check.Schema.Descriptor;
+            if (!schema.Tables.Any(table => table.ExportTargets.Contains(target, StringComparer.Ordinal)))
+            {
+                return new OperationReport(
+                    "convert",
+                    _toolVersion,
+                    false,
+                    [new Diagnostic("target.unknown", DiagnosticSeverity.Blocker, target, "Export target is not declared by the current schema.")],
+                    []);
+            }
 
-        var fullOutput = project.Context.ResolvePath(outputPath);
-        var manifestPath = fullOutput + ".manifest.json";
-        var builder = _schemas.CreatePlanBuilder(project, "convert", schema.SchemaHash);
-        SchemaPipeline.ObserveSchemaInputs(builder, project);
-        foreach (var path in check.WorkbookPaths)
-            builder.Observe(path);
-        builder.WriteFile(fullOutput, package.Bytes);
-        builder.WriteFile(manifestPath, Encoding.UTF8.GetBytes(package.ManifestJson + "\n"));
-        builder.AddRisk($"export-target={target}");
-        var plan = builder.Build();
-        var report = new MutationPlanApplier().Apply(plan);
-        return report with
+            var diagnostics = new List<Diagnostic>();
+            var records = new List<RuntimeAssetRecord>();
+            var imports = new List<WorkbookImportResult>();
+            var importDomainEntries = new List<WorkbookImportDomainEntry>();
+            foreach (var path in check.WorkbookPaths)
+            {
+                var bytes = File.ReadAllBytes(path);
+                EnsureWorkbookBytesMatchSnapshot(project, excelInputs, path, bytes);
+                var inspection = XlsxWorkbookCodec.Inspect(bytes, schema);
+                diagnostics.AddRange(inspection.Diagnostics);
+                if (inspection.Diagnostics.Any(static item => item.IsFailure))
+                    continue;
+                var workbook = inspection.Workbook;
+                var imported = WorkbookImporter.Import(path, bytes, workbook, schema, cellFormats: _cellFormats, validators: _validators);
+                diagnostics.AddRange(imported.Diagnostics);
+                imports.Add(imported);
+                importDomainEntries.Add(new WorkbookImportDomainEntry(path, imported));
+            }
+
+            var allRows = imports.SelectMany(static import => import.Rows).ToArray();
+            diagnostics.AddRange(WorkbookImportDomain.Validate(importDomainEntries));
+            var targetSchema = schema with
+            {
+                Tables = schema.Tables
+                    .Where(table => table.ExportTargets.Contains(target, StringComparer.Ordinal))
+                    .ToImmutableArray(),
+            };
+            foreach (var imported in imports)
+            {
+                foreach (var row in imported.Rows.Where(static row => row.IsIndexable && row.Identity is not null))
+                {
+                    var table = schema.Tables.Single(item => item.Id == row.TableId);
+                    if (!table.ExportTargets.Contains(target, StringComparer.Ordinal))
+                        continue;
+                    var fields = ImmutableArray.CreateBuilder<RuntimeFieldValue>();
+                    var dependencies = new HashSet<AssetIdentity>();
+                    foreach (var field in Flatten(table.Fields)
+                                 .Where(field => field.ExportTargets.Contains(target, StringComparer.Ordinal))
+                                 .OrderBy(static field => FieldPathKey(field), StringComparer.Ordinal))
+                    {
+                        if (!row.Values.TryGetValue(field.PropertyPath, out var value)
+                            || value.State is not (CanonicalValueState.Value or CanonicalValueState.Defaulted))
+                            continue;
+
+                        if (IsRowReference(field))
+                        {
+                            var resolution = RowReferenceResolver.Resolve(field, value.Text!, targetSchema, allRows);
+                            if (!resolution.Succeeded)
+                            {
+                                diagnostics.Add(new Diagnostic(
+                                    "ref.unresolved",
+                                    DiagnosticSeverity.Blocker,
+                                    $"{row.Location}:{field.PropertyPath}",
+                                    resolution.Error!));
+                                continue;
+                            }
+
+                            dependencies.Add(resolution.Identity);
+                            fields.Add(new RuntimeFieldValue(
+                                EffectiveFieldPath(field),
+                                Encoding.UTF8.GetBytes(resolution.Identity.ToString())));
+                            continue;
+                        }
+
+                        fields.Add(new RuntimeFieldValue(EffectiveFieldPath(field), Encoding.UTF8.GetBytes(value.Text!)));
+                    }
+
+                    records.Add(new RuntimeAssetRecord(
+                        row.Identity!.Value,
+                        row.Key ?? string.Empty,
+                        fields,
+                        dependencies.OrderBy(static item => item.TableId)
+                            .ThenBy(static item => item.RowGuid.ToString(), StringComparer.Ordinal),
+                        $"{table.Name}/{row.Key}"));
+                }
+            }
+
+            if (diagnostics.Any(static item => item.IsFailure))
+                return new OperationReport("convert", _toolVersion, false, diagnostics.ToImmutableArray(), []);
+
+            var contentHash = ComputeTargetContentHash(schema.SchemaHash, exportTarget, records);
+            using var snapshot = new SourceSnapshot(schema.SchemaHash, exportTarget, contentHash[..16], contentHash, records);
+            ConvertedBytesPackage package;
+            try
+            {
+                package = ConvertedBytesWriter.Build(snapshot, _toolVersion);
+            }
+            catch (InvalidDataException exception)
+            {
+                return new OperationReport("convert", _toolVersion, false, [new Diagnostic("convert.invalid", DiagnosticSeverity.Blocker, outputPath, exception.Message)], []);
+            }
+
+            if (isExternalOutput)
+            {
+                BeforeExternalInputRevalidation?.Invoke();
+                if (!InputsStillMatch(project, check.Schema, excelInputs))
+                {
+                    return new OperationReport(
+                        "convert",
+                        _toolVersion,
+                        false,
+                        [new Diagnostic(
+                            "plan.stale-input-set",
+                            DiagnosticSeverity.Blocker,
+                            project.Context.RootDirectory,
+                            "Schema, system proto mirror, or Excel inputs changed while convert was preparing output; retry convert.")],
+                        []);
+                }
+                return new ExternalBytesTransaction(_toolVersion).WriteUnderLease(
+                    project.Context.RootDirectory,
+                    fullOutput,
+                    package.Bytes,
+                    Encoding.UTF8.GetBytes(package.ManifestJson + "\n"),
+                    target,
+                    contentHash);
+            }
+            var builder = _schemas.CreatePlanBuilder(project, "convert", schema.SchemaHash);
+            _schemas.ObserveSchemaInputs(builder, project, check.Schema);
+            SchemaPipeline.ObserveExcelInputs(builder, project, excelInputs);
+            foreach (var path in check.WorkbookPaths)
+                builder.Observe(path);
+            builder.WriteFile(fullOutput, package.Bytes);
+            builder.WriteFile(manifestPath, Encoding.UTF8.GetBytes(package.ManifestJson + "\n"));
+            builder.AddRisk($"export-target={target}");
+            var plan = builder.Build();
+            var report = new MutationPlanApplier().Apply(plan);
+            return report with
+            {
+                Diagnostics = report.Diagnostics.Add(new Diagnostic("convert.target", DiagnosticSeverity.Info, target, $"Converted target '{target}', source {contentHash}.")),
+            };
+        }
+        finally
         {
-            Diagnostics = report.Diagnostics.Add(new Diagnostic("convert.target", DiagnosticSeverity.Info, target, $"Converted target '{target}', source {contentHash}.")),
-        };
+            externalLease?.Dispose();
+        }
     }
+
+    private static bool IsContained(string root, string path)
+    {
+        var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path));
+        return !Path.IsPathFullyQualified(relative)
+               && relative != ".."
+               && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+               && !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);
+    }
+
+    private static void EnsureWorkbookBytesMatchSnapshot(
+        PipelineProject project,
+        InputSetObservation snapshot,
+        string path,
+        ReadOnlySpan<byte> bytes)
+    {
+        if (snapshot.Kind != InputSetKind.ExcelWorkbook)
+            throw new InvalidDataException("The frozen workbook input set uses the wrong discovery filter.");
+        var relative = Path.GetRelativePath(project.Context.ExcelDirectory, Path.GetFullPath(path))
+            .Replace('\\', '/');
+        var entry = snapshot.Entries.SingleOrDefault(item =>
+            string.Equals(item.RelativePath, relative, StringComparison.Ordinal));
+        if (entry is null)
+        {
+            throw new InvalidDataException(
+                $"Workbook '{relative}' was not a member of the frozen recursive Excel input set.");
+        }
+        var hash = ContentFingerprint.FromBytes(bytes);
+        if (entry.Kind != ObservedPathKind.File
+            || entry.Length != bytes.Length
+            || !string.Equals(entry.Sha256, hash.Sha256, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Workbook '{relative}' changed after the recursive Excel input set was frozen.");
+        }
+    }
+
+    private static bool InputsStillMatch(
+        PipelineProject project,
+        CompiledProjectSchema schema,
+        InputSetObservation excelInputs)
+    {
+        try
+        {
+            if (!InputSetSnapshot.Matches(project.Context.RootDirectory, excelInputs))
+                return false;
+            if (schema.SchemaInputSet is not null
+                && !InputSetSnapshot.Matches(project.Context.RootDirectory, schema.SchemaInputSet))
+            {
+                return false;
+            }
+            if (schema.SystemProtoMirrorInputSet is not null
+                && !InputSetSnapshot.Matches(project.Context.RootDirectory, schema.SystemProtoMirrorInputSet))
+            {
+                return false;
+            }
+            return schema.SystemImportsManifestObservation is null
+                   || PathObservationSnapshot.Matches(
+                       project.Context.RootDirectory,
+                       schema.SystemImportsManifestObservation);
+        }
+        catch (Exception exception) when (exception is IOException
+                                           or UnauthorizedAccessException
+                                           or InvalidDataException)
+        {
+            return false;
+        }
+    }
+
+    private static bool PathsOverlap(string declaredRoot, string path) =>
+        IsContained(declaredRoot, path) || IsContained(path, declaredRoot);
 
     private static string ComputeTargetContentHash(
         ulong schemaHash,
@@ -511,7 +929,8 @@ public sealed class WorkbookPipeline
         PipelineProject project,
         string? workbookPath,
         CanonicalSchemaDescriptor schema,
-        ICollection<Diagnostic> diagnostics)
+        ICollection<Diagnostic> diagnostics,
+        InputSetObservation? frozenExcelInputs = null)
     {
         var sources = new List<WorkbookSource>();
         foreach (var path in SchemaPipeline.ResolveWorkbooks(project, workbookPath))
@@ -524,6 +943,8 @@ public sealed class WorkbookPipeline
             try
             {
                 var bytes = File.ReadAllBytes(path);
+                if (frozenExcelInputs is not null)
+                    EnsureWorkbookBytesMatchSnapshot(project, frozenExcelInputs, path, bytes);
                 var inspection = XlsxWorkbookCodec.Inspect(bytes, schema);
                 foreach (var diagnostic in inspection.Diagnostics)
                     diagnostics.Add(diagnostic);
@@ -540,27 +961,63 @@ public sealed class WorkbookPipeline
         return sources;
     }
 
-    private static bool CheckGeneratedFresh(PipelineProject project, CanonicalSchemaDescriptor schema, ICollection<Diagnostic> diagnostics)
+    private bool CheckGeneratedFresh(PipelineProject project, CanonicalSchemaDescriptor schema, ICollection<Diagnostic> diagnostics)
     {
-        var generation = new SchemaCodeGenerator().Generate(schema);
+        var generation = new SchemaCodeGenerator().Generate(schema, _schemas.SystemProtoCatalog.CatalogHash);
         var ok = true;
         foreach (var artifact in generation.Artifacts)
         {
-            var path = Path.Combine(project.Context.GeneratedDirectory, artifact.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            var path = Path.Combine(project.Context.GeneratedCSharpDirectory, artifact.RelativePath.Replace('/', Path.DirectorySeparatorChar));
             var expected = Encoding.UTF8.GetBytes(artifact.Content);
-            if (File.Exists(path) && File.ReadAllBytes(path).AsSpan().SequenceEqual(expected))
-                continue;
-            diagnostics.Add(new Diagnostic("codegen.stale", DiagnosticSeverity.Error, SchemaPipeline.Relative(project, path), "Generated C# is missing or stale; run schema build."));
+            try
+            {
+                if (File.Exists(path))
+                {
+                    ProjectPathSafety.EnsurePlainFile(path, "Generated C# artifact");
+                    if (File.ReadAllBytes(path).AsSpan().SequenceEqual(expected))
+                        continue;
+                }
+                diagnostics.Add(new Diagnostic("codegen.stale", DiagnosticSeverity.Error, SchemaPipeline.Relative(project, path), "Generated C# is missing or stale; run schema build."));
+            }
+            catch (Exception exception) when (exception is IOException
+                                               or UnauthorizedAccessException
+                                               or InvalidDataException
+                                               or ArgumentException
+                                               or NotSupportedException)
+            {
+                diagnostics.Add(new Diagnostic(
+                    "codegen.stale",
+                    DiagnosticSeverity.Error,
+                    SchemaPipeline.Relative(project, path),
+                    $"Generated C# is not a safe regular file; run schema build: {exception.Message}"));
+            }
             ok = false;
         }
-        var manifestPath = Path.Combine(project.Context.GeneratedDirectory, "codegen.manifest.json");
+        var manifestPath = Path.Combine(project.Context.GeneratedCSharpDirectory, "codegen.manifest.json");
         var manifest = Encoding.UTF8.GetBytes(generation.Manifest.Json + "\n");
-        if (!File.Exists(manifestPath) || !File.ReadAllBytes(manifestPath).AsSpan().SequenceEqual(manifest))
+        try
         {
+            if (File.Exists(manifestPath))
+            {
+                ProjectPathSafety.EnsurePlainFile(manifestPath, "Codegen manifest");
+                if (File.ReadAllBytes(manifestPath).AsSpan().SequenceEqual(manifest))
+                    return ok;
+            }
             diagnostics.Add(new Diagnostic("codegen.stale", DiagnosticSeverity.Error, SchemaPipeline.Relative(project, manifestPath), "Codegen manifest is missing or stale; run schema build."));
-            ok = false;
         }
-        return ok;
+        catch (Exception exception) when (exception is IOException
+                                           or UnauthorizedAccessException
+                                           or InvalidDataException
+                                           or ArgumentException
+                                           or NotSupportedException)
+        {
+            diagnostics.Add(new Diagnostic(
+                "codegen.stale",
+                DiagnosticSeverity.Error,
+                SchemaPipeline.Relative(project, manifestPath),
+                $"Codegen manifest is not a safe regular file; run schema build: {exception.Message}"));
+        }
+        return false;
     }
 
     private WorkbookDefinition ProjectWorkbookDefinition(

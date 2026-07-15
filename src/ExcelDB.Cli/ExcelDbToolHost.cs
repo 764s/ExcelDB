@@ -4,6 +4,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using ExcelDb.Core.Diagnostics;
 using ExcelDb.Core.IO;
+using ExcelDb.Pipeline;
+using ExcelDb.ProjectHub.Windows;
 using ExcelDb.Tooling.Plans;
 using ExcelDb.Tooling.Project;
 
@@ -22,15 +24,26 @@ public static class ExcelDbToolHost
         string[] args,
         Action<ToolBuilder>? configure = null,
         IToolConsole? console = null,
-        string? currentDirectory = null)
+        string? currentDirectory = null,
+        Action<IExcelDbProjectService, string>? runProjectHub = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         var builder = new ToolBuilder();
         configure?.Invoke(builder);
-        return Task.FromResult(Run(args, builder, console ?? new SystemToolConsole(), currentDirectory ?? Environment.CurrentDirectory));
+        return Task.FromResult(Run(
+            args,
+            builder,
+            console ?? new SystemToolConsole(),
+            currentDirectory ?? Environment.CurrentDirectory,
+            runProjectHub));
     }
 
-    private static int Run(string[] args, ToolBuilder builder, IToolConsole console, string currentDirectory)
+    private static int Run(
+        string[] args,
+        ToolBuilder builder,
+        IToolConsole console,
+        string currentDirectory,
+        Action<IExcelDbProjectService, string>? runProjectHub)
     {
         try
         {
@@ -42,7 +55,9 @@ public static class ExcelDbToolHost
                     return (int)OperationExitCode.UsageOrEnvironment;
                 }
 
-                return RunGuide(builder, console, currentDirectory);
+                var launcher = runProjectHub ?? RunProjectHub;
+                launcher(builder.CreateProjectService(ToolVersion), Path.GetFullPath(currentDirectory));
+                return 0;
             }
 
             if (args is ["--help"] or ["-h"] or ["help"])
@@ -59,8 +74,8 @@ public static class ExcelDbToolHost
 
             return args[0] switch
             {
-                "init" => RunInit(args[1..], console, currentDirectory, implicitInteractive: false),
-                "schema" or "table" or "generate" or "normalize" or "check" or "convert" or "diff" or "data" =>
+                "init" => RunInit(builder, args[1..], console, currentDirectory, implicitInteractive: false),
+                "project" or "schema" or "table" or "generate" or "normalize" or "check" or "convert" or "diff" or "data" =>
                     new PipelineCommandDispatcher(builder, console, currentDirectory, ToolVersion).Run(args[0], args[1..]),
                 _ => UsageError(console, $"Unknown command '{args[0]}'."),
             };
@@ -77,86 +92,8 @@ public static class ExcelDbToolHost
         }
     }
 
-    private static int RunGuide(ToolBuilder builder, IToolConsole console, string currentDirectory)
-    {
-        console.WriteLine($"ExcelDB Project guide  {Path.GetFullPath(currentDirectory)}");
-        console.WriteLine("[1/3] Project initialization");
-        var projectFile = ProjectLocator.FindNearest(currentDirectory);
-        if (projectFile is null)
-        {
-            var init = RunInit([currentDirectory], console, currentDirectory, implicitInteractive: true);
-            if (init != 0)
-                return init;
-            projectFile = Path.Combine(Path.GetFullPath(currentDirectory), ExcelDbProject.FileName);
-            if (!File.Exists(projectFile))
-                return 0;
-        }
-        else
-        {
-            console.WriteLine($"  Project: {projectFile}");
-        }
-
-        var project = ExcelDbProject.Load(projectFile).Resolve(projectFile);
-        var dispatcher = new PipelineCommandDispatcher(builder, console, project.RootDirectory, ToolVersion);
-        console.WriteLine("[2/3] Create or synchronize table structure and generated C#");
-        var hasProto = Directory.Exists(project.SchemaDirectory)
-            && Directory.EnumerateFiles(project.SchemaDirectory, "*.proto", SearchOption.AllDirectories).Any();
-        if (!hasProto)
-        {
-            console.Write("Table name [Hero]: ");
-            var table = console.ReadLine();
-            if (string.IsNullOrWhiteSpace(table))
-                table = "Hero";
-            console.Write("Workbook [Data/game.xlsx]: ");
-            var workbook = console.ReadLine();
-            if (string.IsNullOrWhiteSpace(workbook))
-                workbook = "Data/game.xlsx";
-            console.Write("Simple fields, comma-separated [name:string,hp:int32]: ");
-            var fieldText = console.ReadLine();
-            if (string.IsNullOrWhiteSpace(fieldText))
-                fieldText = "name:string,hp:int32";
-            var createArgs = new List<string> { "create", table, "--workbook", workbook, "--auto-key" };
-            foreach (var field in fieldText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                createArgs.Add("--field");
-                createArgs.Add(field);
-            }
-            console.WriteLine($"> exceldb table create {table} --workbook {workbook}");
-            var create = dispatcher.Run("table", [.. createArgs]);
-            if (create != 0)
-                return create;
-        }
-        else
-        {
-            var checkBuild = dispatcher.Run("schema", ["build", "--check"]);
-            if (checkBuild != 0)
-            {
-                console.WriteLine("> exceldb schema build");
-                var build = dispatcher.Run("schema", ["build"]);
-                if (build != 0)
-                    return build;
-            }
-        }
-
-        console.WriteLine("[3/3] Fill Excel, prepare identities, validate, and convert client data");
-        console.WriteLine("Save the workbook in Excel, then press Enter to continue.");
-        _ = console.ReadLine();
-        console.WriteLine("> exceldb data prepare");
-        var prepare = dispatcher.Run("data", ["prepare"]);
-        if (prepare != 0)
-            return prepare;
-        console.WriteLine("> exceldb check");
-        var check = dispatcher.Run("check", []);
-        if (check != 0)
-            return check;
-        console.WriteLine("> exceldb convert");
-        var convert = dispatcher.Run("convert", []);
-        if (convert == 0)
-            console.WriteLine("Guide complete. Runtime, application write-back, Play switching, Git review, CI and publishing remain explicit entry points.");
-        return convert;
-    }
-
     private static int RunInit(
+        ToolBuilder builder,
         string[] args,
         IToolConsole console,
         string currentDirectory,
@@ -166,6 +103,7 @@ public static class ExcelDbToolHost
         string? planOutput = null;
         string? applyPlan = null;
         string? jsonOutput = null;
+        string? generatedCSharpDirectory = null;
         var dryRun = false;
 
         for (var index = 0; index < args.Length; index++)
@@ -184,6 +122,9 @@ public static class ExcelDbToolHost
                 case "--json":
                     jsonOutput = ReadValue(args, ref index, "--json");
                     break;
+                case "--generated-csharp-dir":
+                    generatedCSharpDirectory = ReadValue(args, ref index, "--generated-csharp-dir");
+                    break;
                 default:
                     if (args[index].StartsWith("-", StringComparison.Ordinal))
                         return UsageError(console, $"Unknown init option '{args[index]}'.");
@@ -196,14 +137,14 @@ public static class ExcelDbToolHost
 
         if (applyPlan is not null)
         {
-            if (target is not null || dryRun || planOutput is not null || jsonOutput is not null)
-                return UsageError(console, "--apply-plan cannot be combined with target, --dry-run, --plan or --json.");
+            if (target is not null || generatedCSharpDirectory is not null || dryRun || planOutput is not null || jsonOutput is not null)
+                return UsageError(console, "--apply-plan cannot be combined with target, --generated-csharp-dir, --dry-run, --plan or --json.");
 
             var planPath = Path.GetFullPath(applyPlan, currentDirectory);
             var frozenPlan = MutationPlanCodec.Deserialize(File.ReadAllBytes(planPath));
             if (!string.Equals(frozenPlan.Operation, "init", StringComparison.Ordinal))
                 return UsageError(console, "The supplied plan is not an init plan.");
-            return PresentReport(console, new MutationPlanApplier().Apply(frozenPlan), null);
+            return PresentReport(console, builder.CreateProjectService(ToolVersion).Apply(frozenPlan), null);
         }
 
         if (dryRun != (planOutput is not null))
@@ -213,14 +154,18 @@ public static class ExcelDbToolHost
 
         target ??= currentDirectory;
         var fullTarget = Path.GetFullPath(target, currentDirectory);
-        var initializer = new ProjectInitializer(ToolVersion);
-        var plan = initializer.Plan(fullTarget);
+        var projects = builder.CreateProjectService(ToolVersion);
+        var plan = projects.PlanInitialize(new ExcelDb.Pipeline.InitializeProjectRequest(
+            ExcelDb.Pipeline.ProjectLocation.From(fullTarget),
+            generatedCSharpDirectory is null ? null : Path.GetFullPath(generatedCSharpDirectory, currentDirectory)));
 
         if (dryRun)
         {
             var planPath = Path.GetFullPath(planOutput!, currentDirectory);
             Directory.CreateDirectory(Path.GetDirectoryName(planPath)!);
-            plan = initializer.Plan(fullTarget);
+            plan = projects.PlanInitialize(new ExcelDb.Pipeline.InitializeProjectRequest(
+                ExcelDb.Pipeline.ProjectLocation.From(fullTarget),
+                generatedCSharpDirectory is null ? null : Path.GetFullPath(generatedCSharpDirectory, currentDirectory)));
             AtomicFile.WriteAllBytes(planPath, MutationPlanCodec.Serialize(plan));
             PresentPlan(console, plan);
             console.WriteLine($"plan: {planPath}");
@@ -241,7 +186,7 @@ public static class ExcelDbToolHost
             }
         }
 
-        var report = new MutationPlanApplier().Apply(plan);
+        var report = projects.Apply(plan);
         return PresentReport(console, report, jsonOutput is null ? null : Path.GetFullPath(jsonOutput, currentDirectory));
     }
 
@@ -266,11 +211,30 @@ public static class ExcelDbToolHost
     {
         console.WriteLine($"Operation: {plan.Operation}");
         console.WriteLine($"Project: {plan.ProjectRoot}");
+        if (IsExternalRoot(plan.ProjectRoot, plan.GeneratedCSharpRoot))
+            console.WriteLine($"Generated C#: {plan.GeneratedCSharpRoot} (external root)");
         console.WriteLine($"Plan: {plan.PlanHash}");
         foreach (var mutation in plan.Mutations)
-            console.WriteLine($"  {mutation.Kind}: {mutation.RelativePath}");
+            console.WriteLine($"  [{mutation.Root}] {mutation.Kind}: {mutation.RelativePath}");
         foreach (var diagnostic in plan.Diagnostics)
             console.WriteLine($"  {diagnostic.Severity}: {diagnostic.Code} {diagnostic.Location}: {diagnostic.Message}");
+    }
+
+    private static void RunProjectHub(IExcelDbProjectService service, string initialDirectory)
+    {
+        WindowsConsoleWindow.DetachIfOwned();
+        ProjectHubApplication.Run(service, initialDirectory);
+    }
+
+    private static bool IsExternalRoot(string projectRoot, string? candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate))
+            return false;
+        var relative = Path.GetRelativePath(Path.GetFullPath(projectRoot), Path.GetFullPath(candidate));
+        return Path.IsPathFullyQualified(relative)
+               || relative == ".."
+               || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+               || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);
     }
 
     private static string ReadValue(string[] args, ref int index, string option)
@@ -292,19 +256,24 @@ public static class ExcelDbToolHost
     {
         console.WriteLine("ExcelDB project tool");
         console.WriteLine("usage:");
-        console.WriteLine("  exceldb init [path]");
+        console.WriteLine("  exceldb                         # open Project Hub (interactive Windows)");
+        console.WriteLine("  exceldb init [path] [--generated-csharp-dir <path>]");
         console.WriteLine("  exceldb init [path] --dry-run --plan <file>");
         console.WriteLine("  exceldb init --apply-plan <file>");
+        console.WriteLine("  exceldb project inspect");
+        console.WriteLine("  exceldb project configure [--schema-dir <path>] [--excel-dir <path>] [--generated-csharp-dir <path>] [--generated-bytes-dir <path>]");
+        console.WriteLine("  exceldb project repair-imports");
+        console.WriteLine("  exceldb project clean-cache");
         console.WriteLine("  exceldb schema build [--check]");
         console.WriteLine("  exceldb schema compatibility [--json <report>]");
         console.WriteLine("  exceldb schema publish [--host-migrated <target>] [--dry-run --plan <file> | --apply-plan <file>]");
-        console.WriteLine("  exceldb table create <name> --workbook <xlsx> [--auto-key] [--field <name:type>]");
+        console.WriteLine("  exceldb table create <name> --workbook <xlsx> [--auto-key | --key <name:type> | --field <name:type:key>] [--field <name:type>]");
         console.WriteLine("  exceldb table edit <full-name> [--add <name:type>] [--rename <number:name>] [--remove <number>] [--retire]");
-        console.WriteLine("  exceldb generate [--workbook <xlsx>] [--purge|--rekey]");
+        console.WriteLine("  exceldb generate");
         console.WriteLine("  exceldb normalize [--workbook <xlsx>]");
         console.WriteLine("  exceldb data prepare [--workbook <xlsx>]");
         console.WriteLine("  exceldb check [--workbook <xlsx>] [--json <report>]");
-        console.WriteLine("  exceldb convert [--target client|server] [--out <bytes>] [--json <report>]");
+        console.WriteLine("  exceldb convert [--target <target-id>] [--out <bytes>] [--json <report>]");
         console.WriteLine("  exceldb diff <base.xlsx> <target.xlsx> [--json <report>]");
         console.WriteLine("  exceldb --help | --version");
     }

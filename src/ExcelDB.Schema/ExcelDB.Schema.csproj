@@ -8,7 +8,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <Deterministic>true</Deterministic>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <!-- Tool payload ownership moves to the future self-contained CLI project; do not publish a broken library package. -->
+    <!-- Schema tooling is delivered only inside the self-contained exceldb executable. -->
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
@@ -27,11 +27,13 @@
     <None Update="Protos\exceldb\options.proto"
           Link="schema-system\exceldb\options.proto"
           CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
+          CopyToPublishDirectory="PreserveNewest"
+          ExcludeFromSingleFile="false" />
     <None Include="$(PkgGrpc_Tools)\build\native\include\google\protobuf\**\*.proto"
           Link="schema-system\google\protobuf\%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
+          CopyToPublishDirectory="PreserveNewest"
+          ExcludeFromSingleFile="false" />
     <None Include="$(PkgGrpc_Tools)\tools\windows_x64\protoc.exe"
           Link="schema-tools\windows-x64\protoc.exe"
           CopyToOutputDirectory="PreserveNewest"

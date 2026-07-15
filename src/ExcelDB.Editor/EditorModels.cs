@@ -36,9 +36,9 @@ public sealed record EditorBrowserSnapshot(
 public sealed record EditorProjectMountState(
     bool HasProject,
     string ProjectFile,
-    ImmutableArray<string> ConfiguredWorkbooks,
+    string ExcelDirectory,
     ImmutableArray<string> MountedWorkbooks,
-    ImmutableArray<string> MissingPatterns);
+    ImmutableArray<Diagnostic> Diagnostics);
 
 public sealed record EditorRowReferenceConstraint(string RefTable, string? RefGroup = null);
 
@@ -152,15 +152,20 @@ public sealed record EditorRuntimeActionResult(
 
 public sealed record ProjectSettingsProjection(
     string SchemaDir,
-    string GeneratedDir,
-    ImmutableArray<string> Workbooks,
-    string BytesOutput,
-    string CacheDir,
+    string ExcelDir,
+    string GeneratedCSharpDir,
+    string GeneratedBytesDir,
     ulong? SchemaHash,
     string ToolVersion)
 {
     public static ProjectSettingsProjection FromProject(ExcelDbProject project, ulong? schemaHash, string toolVersion) =>
-        new(project.SchemaDir, project.GeneratedDir, project.Workbooks, project.BytesOutput, project.CacheDir, schemaHash, toolVersion);
+        new(
+            project.SchemaDir,
+            project.ExcelDir,
+            project.GeneratedCSharpDir,
+            project.GeneratedBytesDir,
+            schemaHash,
+            toolVersion);
 }
 
 public interface IEditorAssetStatusProvider

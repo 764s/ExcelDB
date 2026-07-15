@@ -8,6 +8,7 @@ using ExcelDb.Core.IO;
 using ExcelDb.Runtime.Bytes;
 using ExcelDb.Schema.Generation;
 using ExcelDb.Tooling.Plans;
+using ExcelDb.Tooling.Project;
 using ExcelDb.Workbooks.Formatting;
 using ExcelDb.Workbooks.Importing;
 using ExcelDb.Workbooks.OpenXml;
@@ -33,16 +34,19 @@ public sealed class CompatibilityPipeline
     private readonly string _toolVersion;
     private readonly SchemaPipeline _schemas;
     private readonly CellFormatRegistry _cellFormats;
+    private readonly WorkbookValidatorRegistry _validators;
 
     public CompatibilityPipeline(
         string toolVersion,
         SchemaPipeline schemas,
-        CellFormatRegistry? cellFormats = null)
+        CellFormatRegistry? cellFormats = null,
+        WorkbookValidatorRegistry? validators = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(toolVersion);
         _toolVersion = toolVersion;
         _schemas = schemas ?? throw new ArgumentNullException(nameof(schemas));
         _cellFormats = cellFormats ?? new CellFormatRegistry();
+        _validators = validators ?? new WorkbookValidatorRegistry();
     }
 
     public async Task<CompatibilityAnalysisOutcome> AnalyzeAsync(
@@ -99,15 +103,78 @@ public sealed class CompatibilityPipeline
         IEnumerable<string>? completedHostMigrations = null,
         CancellationToken cancellationToken = default)
     {
-        var analysis = await AnalyzeAsync(project, cancellationToken).ConfigureAwait(false);
-        var readiness = await new WorkbookPipeline(_toolVersion, _schemas, _cellFormats)
-            .CheckAsync(project, pendingIsBlocker: true, cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
-        var schemaHash = analysis.Schema?.Descriptor.SchemaHash ?? 0;
-        var builder = _schemas.CreatePlanBuilder(project, "schema-publish", schemaHash);
-        SchemaPipeline.ObserveSchemaInputs(builder, project);
-        foreach (var workbook in analysis.WorkbookPaths)
+        ArgumentNullException.ThrowIfNull(project);
+        var bootstrapDiagnostics = new List<Diagnostic>();
+        var bootstrapSchema = await _schemas.CompileAsync(project, bootstrapDiagnostics, cancellationToken).ConfigureAwait(false);
+        var bootstrapHash = bootstrapSchema?.Descriptor.SchemaHash ?? 0;
+        var builder = _schemas.CreatePlanBuilder(project, "schema-publish", bootstrapHash);
+        _schemas.ObserveSchemaInputs(builder, project);
+        if (bootstrapSchema is null)
+        {
+            foreach (var diagnostic in bootstrapDiagnostics)
+                builder.AddDiagnostic(diagnostic);
+            return builder.Build();
+        }
+
+        // Recompile only after the plan has frozen every schema input. A source edit
+        // racing the bootstrap compile therefore either blocks this plan immediately
+        // or makes it stale at apply time.
+        var diagnostics = new List<Diagnostic>();
+        var schema = await _schemas.CompileAsync(project, diagnostics, cancellationToken).ConfigureAwait(false);
+        if (schema is null)
+        {
+            foreach (var diagnostic in diagnostics)
+                builder.AddDiagnostic(diagnostic);
+            return builder.Build();
+        }
+        if (schema.Descriptor.SchemaHash != bootstrapHash)
+        {
+            builder.AddDiagnostic(new Diagnostic(
+                "compat.publish.schema-race",
+                DiagnosticSeverity.Blocker,
+                project.Context.Project.SchemaDir,
+                "Schema inputs changed while the publish plan was being created; retry publication."));
+            return builder.Build();
+        }
+
+        var history = PublishedSchemaHistoryStore.LoadLatest(project, builder);
+        diagnostics.AddRange(history.Diagnostics);
+        var excelInputs = SchemaPipeline.CaptureExcelInputs(project);
+        SchemaPipeline.ObserveExcelInputs(builder, project, excelInputs);
+        var workbookPaths = SchemaPipeline.ResolveWorkbooks(project).ToImmutableArray();
+        foreach (var workbook in workbookPaths)
             builder.Observe(workbook);
+        var (facts, _, factDiagnostics) = BuildWorkbookFacts(project, schema, workbookPaths);
+        diagnostics.AddRange(factDiagnostics);
+        CompatibilityReport? compatibilityReport = null;
+        if (history.IsValid)
+        {
+            compatibilityReport = new CompatibilityAnalyzer().Analyze(
+                schema.Descriptor,
+                history.Latest?.Descriptor,
+                facts);
+            diagnostics.AddRange(compatibilityReport.Diagnostics);
+        }
+        var analysis = new CompatibilityAnalysisOutcome(
+            schema,
+            history.Latest,
+            facts,
+            compatibilityReport,
+            diagnostics
+                .Distinct()
+                .OrderByDescending(static item => item.Severity)
+                .ThenBy(static item => item.Code, StringComparer.Ordinal)
+                .ThenBy(static item => item.Location, StringComparer.Ordinal)
+                .ToImmutableArray(),
+            workbookPaths);
+        var workbookPipeline = new WorkbookPipeline(_toolVersion, _schemas, _cellFormats, _validators);
+        var readiness = await workbookPipeline
+            .CheckAsync(
+                project,
+                pendingIsBlocker: true,
+                cancellationToken: cancellationToken,
+                frozenExcelInputs: excelInputs)
+            .ConfigureAwait(false);
         foreach (var diagnostic in analysis.Diagnostics)
             builder.AddDiagnostic(diagnostic);
         foreach (var diagnostic in readiness.Report.Diagnostics)
@@ -136,19 +203,37 @@ public sealed class CompatibilityPipeline
                 "Every configured workbook must be readable and mapped before publishing schema history."));
         }
 
-        var preview = builder.Build();
-        if (preview.HasBlockers || preview.Diagnostics.Any(static item => item.IsFailure))
-            return preview;
+        IReadOnlyDictionary<string, ConvertedBytesPackage> expectedPackages =
+            ImmutableDictionary<string, ConvertedBytesPackage>.Empty;
+        if (readiness.Schema is not null && readiness.Report.Succeeded)
+        {
+            var projectionDiagnostics = new List<Diagnostic>();
+            expectedPackages = workbookPipeline.BuildExpectedBytePackages(
+                project,
+                readiness.Schema.Descriptor,
+                readiness.WorkbookPaths,
+                projectionDiagnostics,
+                excelInputs);
+            foreach (var diagnostic in projectionDiagnostics)
+                builder.AddDiagnostic(diagnostic);
+        }
 
         var publication = EvaluateTargetPublication(
+            builder,
             project,
             analysis,
+            expectedPackages,
             completedHostMigrations ?? []);
         foreach (var diagnostic in publication.Diagnostics)
             builder.AddDiagnostic(diagnostic);
-        if (!publication.Allowed)
-            return builder.Build();
-        PublishedSchemaHistoryStore.AddPublishMutations(builder, project, analysis.Schema);
+        var preview = builder.Build();
+        if (preview.HasBlockers
+            || preview.Diagnostics.Any(static item => item.IsFailure)
+            || !publication.Allowed)
+        {
+            return preview;
+        }
+        PublishedSchemaHistoryStore.AddPublishMutations(builder, project, analysis.Schema, history);
         var reportPath = Path.Combine(
             PublishedSchemaHistoryStore.DirectoryPath(project),
             $"compat-{analysis.Schema.Descriptor.SchemaHash:x16}.json");
@@ -162,8 +247,10 @@ public sealed class CompatibilityPipeline
     }
 
     private TargetPublicationGateResult EvaluateTargetPublication(
+        MutationPlanBuilder builder,
         PipelineProject project,
         CompatibilityAnalysisOutcome analysis,
+        IReadOnlyDictionary<string, ConvertedBytesPackage> expectedPackages,
         IEnumerable<string> completedHostMigrations)
     {
         var schema = analysis.Schema
@@ -172,7 +259,14 @@ public sealed class CompatibilityPipeline
             ?? throw new InvalidOperationException("Publication requires a compatibility report.");
         var evidence = ImmutableArray.CreateBuilder<TargetArtifactEvidence>();
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
-        var generation = new SchemaCodeGenerator().Generate(schema.Descriptor);
+        var generation = new SchemaCodeGenerator().Generate(
+            schema.Descriptor,
+            _schemas.SystemProtoCatalog.CatalogHash);
+        var generatedSnapshots = CaptureExpectedGeneratedArtifacts(
+            builder,
+            project,
+            generation,
+            diagnostics);
         foreach (var targetText in schema.Descriptor.Tables
                      .SelectMany(static table => table.ExportTargets)
                      .Distinct(StringComparer.Ordinal)
@@ -185,8 +279,8 @@ public sealed class CompatibilityPipeline
                 .ToArray();
             var registryFiles = targetArtifacts.Where(static artifact => artifact.Kind == "runtime-registry-csharp").ToArray();
             var codegenFiles = targetArtifacts.Where(static artifact => artifact.Kind == "runtime-csharp").ToArray();
-            var registry = BuildGeneratedComponent(project, schema.Descriptor.SchemaHash, target, registryFiles, diagnostics);
-            var codegen = BuildGeneratedComponent(project, schema.Descriptor.SchemaHash, target, codegenFiles, diagnostics);
+            var registry = BuildGeneratedComponent(schema.Descriptor.SchemaHash, target, registryFiles, generatedSnapshots);
+            var codegen = BuildGeneratedComponent(schema.Descriptor.SchemaHash, target, codegenFiles, generatedSnapshots);
 
             var bytesPath = WorkbookPipeline.DefaultOutputPath(project, targetText);
             var manifestPath = bytesPath + ".manifest.json";
@@ -194,14 +288,31 @@ public sealed class CompatibilityPipeline
             TargetArtifactComponentEvidence? manifestEvidence = null;
             try
             {
+                builder.Observe(bytesPath);
+                builder.Observe(manifestPath);
                 if (!File.Exists(bytesPath) || !File.Exists(manifestPath))
                     throw new InvalidDataException($"Converted target '{targetText}' is missing bytes or manifest at '{bytesPath}'.");
+                ProjectPathSafety.EnsurePlainFile(bytesPath, $"Converted target '{targetText}' bytes");
+                ProjectPathSafety.EnsurePlainFile(manifestPath, $"Converted target '{targetText}' manifest");
                 var bytes = File.ReadAllBytes(bytesPath);
-                var manifestText = File.ReadAllText(manifestPath);
+                var manifestBytes = File.ReadAllBytes(manifestPath);
+                var manifestText = System.Text.Encoding.UTF8.GetString(manifestBytes);
                 var manifest = ConvertedBytesManifest.Parse(manifestText);
                 using var converted = ConvertedBytesReader.Read(bytes, manifestText).Snapshot;
                 if (manifest.SchemaHash != schema.Descriptor.SchemaHash || manifest.ExportTarget != target)
                     throw new InvalidDataException($"Converted target '{targetText}' does not match the current schema identity.");
+                if (!expectedPackages.TryGetValue(targetText, out var expectedPackage))
+                {
+                    throw new InvalidDataException(
+                        $"Converted target '{targetText}' cannot be proven against the current Excel source projection.");
+                }
+                var expectedManifestBytes = System.Text.Encoding.UTF8.GetBytes(expectedPackage.ManifestJson + "\n");
+                if (!bytes.AsSpan().SequenceEqual(expectedPackage.Bytes)
+                    || !manifestBytes.AsSpan().SequenceEqual(expectedManifestBytes))
+                {
+                    throw new InvalidDataException(
+                        $"Converted target '{targetText}' is stale and must be regenerated from the current Excel data before publishing.");
+                }
                 bytesEvidence = new TargetArtifactComponentEvidence(
                     manifest.SchemaHash,
                     manifest.ExportTarget,
@@ -209,7 +320,7 @@ public sealed class CompatibilityPipeline
                 manifestEvidence = new TargetArtifactComponentEvidence(
                     manifest.SchemaHash,
                     manifest.ExportTarget,
-                    ContentFingerprint.FromBytes(System.Text.Encoding.UTF8.GetBytes(manifestText)).Sha256);
+                    ContentFingerprint.FromBytes(manifestBytes).Sha256);
             }
             catch (Exception exception) when (exception is IOException
                                                or InvalidDataException
@@ -252,12 +363,80 @@ public sealed class CompatibilityPipeline
         };
     }
 
-    private static TargetArtifactComponentEvidence? BuildGeneratedComponent(
+    private static ImmutableDictionary<string, byte[]> CaptureExpectedGeneratedArtifacts(
+        MutationPlanBuilder builder,
         PipelineProject project,
+        SchemaCodeGenerationResult generation,
+        ImmutableArray<Diagnostic>.Builder diagnostics)
+    {
+        var snapshots = ImmutableDictionary.CreateBuilder<string, byte[]>(StringComparer.Ordinal);
+        var manifestPath = Path.Combine(project.Context.GeneratedCSharpDirectory, "codegen.manifest.json");
+        builder.Observe(PlanRootKind.GeneratedCSharp, "codegen.manifest.json");
+        try
+        {
+            if (!File.Exists(manifestPath))
+                throw new InvalidDataException("codegen.manifest.json is missing; generated files have no current ownership authority.");
+            ProjectPathSafety.EnsurePlainFile(manifestPath, "Generated C# ownership manifest");
+            var actualManifest = File.ReadAllBytes(manifestPath);
+            var expectedManifest = System.Text.Encoding.UTF8.GetBytes(generation.Manifest.Json + "\n");
+            if (!actualManifest.AsSpan().SequenceEqual(expectedManifest))
+            {
+                throw new InvalidDataException(
+                    "codegen.manifest.json does not exactly match the current generator output; generated-file ownership is stale or unknown.");
+            }
+        }
+        catch (Exception exception) when (exception is IOException
+                                           or InvalidDataException
+                                           or UnauthorizedAccessException)
+        {
+            diagnostics.Add(new Diagnostic(
+                "compat.publish.generated-ownership",
+                DiagnosticSeverity.Blocker,
+                "codegen.manifest.json",
+                exception.Message));
+        }
+
+        foreach (var artifact in generation.Artifacts.OrderBy(static item => item.RelativePath, StringComparer.Ordinal))
+        {
+            var path = Path.Combine(
+                project.Context.GeneratedCSharpDirectory,
+                artifact.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            builder.Observe(PlanRootKind.GeneratedCSharp, artifact.RelativePath);
+            try
+            {
+                if (!File.Exists(path))
+                    throw new InvalidDataException("The expected generated C# file is missing.");
+                ProjectPathSafety.EnsurePlainFile(path, "Generated C# artifact");
+                var actual = File.ReadAllBytes(path);
+                var expected = System.Text.Encoding.UTF8.GetBytes(artifact.Content);
+                var actualHash = ContentFingerprint.FromBytes(actual).Sha256;
+                if (!actual.AsSpan().SequenceEqual(expected)
+                    || !string.Equals(actualHash, artifact.ContentHash, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        $"Generated C# differs from the current SchemaCodeGenerator output: expected {artifact.ContentHash}, actual {actualHash}.");
+                }
+                snapshots.Add(artifact.RelativePath, actual);
+            }
+            catch (Exception exception) when (exception is IOException
+                                               or InvalidDataException
+                                               or UnauthorizedAccessException)
+            {
+                diagnostics.Add(new Diagnostic(
+                    "compat.publish.generated-invalid",
+                    DiagnosticSeverity.Blocker,
+                    artifact.RelativePath,
+                    exception.Message));
+            }
+        }
+        return snapshots.ToImmutable();
+    }
+
+    private static TargetArtifactComponentEvidence? BuildGeneratedComponent(
         ulong schemaHash,
         ExportTargetId target,
         IReadOnlyCollection<GeneratedSchemaArtifact> artifacts,
-        ImmutableArray<Diagnostic>.Builder diagnostics)
+        IReadOnlyDictionary<string, byte[]> snapshots)
     {
         if (artifacts.Count == 0)
             return null;
@@ -265,17 +444,8 @@ public sealed class CompatibilityPipeline
         var length = new byte[sizeof(int)];
         foreach (var artifact in artifacts.OrderBy(static item => item.RelativePath, StringComparer.Ordinal))
         {
-            var path = Path.Combine(project.Context.GeneratedDirectory, artifact.RelativePath.Replace('/', Path.DirectorySeparatorChar));
-            if (!File.Exists(path))
-            {
-                diagnostics.Add(new Diagnostic(
-                    "compat.publish.generated-missing",
-                    DiagnosticSeverity.Blocker,
-                    SchemaPipeline.Relative(project, path),
-                    "A generated target component is missing."));
+            if (!snapshots.TryGetValue(artifact.RelativePath, out var bytes))
                 return null;
-            }
-            var bytes = File.ReadAllBytes(path);
             var pathBytes = System.Text.Encoding.UTF8.GetBytes(artifact.RelativePath);
             BinaryPrimitives.WriteInt32LittleEndian(length, pathBytes.Length);
             stream.Write(length);
@@ -291,23 +461,17 @@ public sealed class CompatibilityPipeline
     }
 
     private (CompatibilityDataFacts Facts, ImmutableArray<string> Paths, ImmutableArray<Diagnostic> Diagnostics)
-        BuildWorkbookFacts(PipelineProject project, CompiledProjectSchema schema)
+        BuildWorkbookFacts(
+            PipelineProject project,
+            CompiledProjectSchema schema,
+            ImmutableArray<string> frozenPaths = default)
     {
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
-        var paths = SchemaPipeline.ResolveWorkbooks(project).ToImmutableArray();
+        var paths = frozenPaths.IsDefault
+            ? SchemaPipeline.ResolveWorkbooks(project).ToImmutableArray()
+            : frozenPaths;
         var workbookFacts = ImmutableArray.CreateBuilder<WorkbookCompatibilityFacts>();
         var nonEmpty = ImmutableHashSet.CreateBuilder<int>();
-        var expectedGlobCount = project.Context.Project.Workbooks.Length;
-        var resolvedGlobCount = 0;
-        foreach (var glob in project.Context.Project.Workbooks)
-        {
-            var normalized = glob.Replace('/', Path.DirectorySeparatorChar);
-            var directory = project.Context.ResolvePath(Path.GetDirectoryName(normalized) ?? ".");
-            var pattern = Path.GetFileName(normalized);
-            if (Directory.Exists(directory)
-                && Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly).Any())
-                resolvedGlobCount++;
-        }
 
         foreach (var path in paths)
         {
@@ -346,8 +510,9 @@ public sealed class CompatibilityPipeline
             }
         }
 
-        var complete = resolvedGlobCount == expectedGlobCount
-                       && paths.Length != 0
+        var requiresWorkbook = schema.Descriptor.Tables.Any(static table =>
+            table.Kind == ExcelDb.Schema.Descriptors.CanonicalTableKind.Asset);
+        var complete = (!requiresWorkbook || paths.Length != 0)
                        && workbookFacts.Count == paths.Length
                        && !diagnostics.Any(static item => item.IsFailure);
         var facts = new CompatibilityDataFacts(nonEmpty.ToImmutable(), complete)

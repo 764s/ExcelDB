@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using ExcelDb.Core.Diagnostics;
 using ExcelDb.Core.Identity;
 using ExcelDb.Core.IO;
+using ExcelDb.Pipeline;
 using ExcelDb.Runtime;
 using ExcelDb.Runtime.Bytes;
 using ExcelDb.Tooling.Plans;
@@ -63,42 +64,81 @@ public sealed class EditorReportRing
     }
 }
 
-public sealed class EditorProjectMountService(string toolVersion)
+public sealed class EditorProjectMountService
 {
-    public MutationPlan PlanInitialize(string targetDirectory) => new ProjectInitializer(toolVersion).Plan(targetDirectory);
+    private readonly IExcelDbProjectService _projects;
 
-    public OperationReport Initialize(string targetDirectory) => new MutationPlanApplier().Apply(PlanInitialize(targetDirectory));
+    public EditorProjectMountService(string toolVersion)
+    {
+        _projects = new ExcelDbProjectService(toolVersion);
+    }
+
+    public MutationPlan PlanInitialize(string targetDirectory) =>
+        _projects.PlanInitialize(new InitializeProjectRequest(ExcelDb.Pipeline.ProjectLocation.From(targetDirectory)));
+
+    public MutationPlan PlanInitialize(string targetDirectory, string generatedCSharpDirectory) =>
+        _projects.PlanInitialize(new InitializeProjectRequest(
+            ExcelDb.Pipeline.ProjectLocation.From(targetDirectory),
+            generatedCSharpDirectory));
+
+    public OperationReport Initialize(string targetDirectory) => Initialize(PlanInitialize(targetDirectory));
+
+    public OperationReport Initialize(string targetDirectory, string generatedCSharpDirectory) =>
+        Initialize(PlanInitialize(targetDirectory, generatedCSharpDirectory));
 
     public EditorProjectMountState Inspect(string projectFile)
     {
         var fullProject = Path.GetFullPath(projectFile);
         if (!File.Exists(fullProject))
-            return new EditorProjectMountState(false, fullProject, [], [], []);
+            return new EditorProjectMountState(false, fullProject, string.Empty, [], []);
 
-        var context = ExcelDbProject.Load(fullProject).Resolve(fullProject);
-        var mounted = new SortedSet<string>(StringComparer.Ordinal);
-        var missing = ImmutableArray.CreateBuilder<string>();
-        foreach (var glob in context.Project.Workbooks)
+        var sharedInspection = _projects.Inspect(ExcelDb.Pipeline.ProjectLocation.From(fullProject));
+        if (sharedInspection.ProjectFilePath is null
+            || sharedInspection.Status is ProjectStatus.Invalid or ProjectStatus.Legacy or ProjectStatus.RecoveryRequired)
         {
-            var normalized = glob.Replace('/', Path.DirectorySeparatorChar);
-            var directoryPart = Path.GetDirectoryName(normalized) ?? ".";
-            var pattern = Path.GetFileName(normalized);
-            var directory = context.ResolvePath(directoryPart);
-            var matches = Directory.Exists(directory)
-                ? Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly).Select(Path.GetFullPath).ToArray()
-                : [];
-            if (matches.Length == 0)
-                missing.Add(glob);
-            foreach (var match in matches)
-                mounted.Add(match);
+            return new EditorProjectMountState(
+                false,
+                fullProject,
+                string.Empty,
+                [],
+                sharedInspection.Diagnostics);
+        }
+        var context = ExcelDbProject.Load(fullProject).Resolve(fullProject);
+        var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
+        diagnostics.AddRange(sharedInspection.Diagnostics);
+        ImmutableArray<string> mounted;
+        if (!Directory.Exists(context.ExcelDirectory))
+        {
+            diagnostics.Add(new Diagnostic(
+                "project.excel-missing",
+                DiagnosticSeverity.Warning,
+                context.ExcelDirectory,
+                "The configured Excel directory does not exist."));
+            mounted = [];
+        }
+        else
+        {
+            try
+            {
+                mounted = context.EnumerateExcelFiles();
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                diagnostics.Add(new Diagnostic(
+                    "project.excel-invalid",
+                    DiagnosticSeverity.Blocker,
+                    context.ExcelDirectory,
+                    exception.Message));
+                mounted = [];
+            }
         }
 
         return new EditorProjectMountState(
             true,
             fullProject,
-            context.Project.Workbooks,
-            mounted.ToImmutableArray(),
-            missing.ToImmutable());
+            context.ExcelDirectory,
+            mounted,
+            diagnostics.ToImmutable());
     }
 
     public EditorProjectMountState MountConfigured(string projectFile)
@@ -108,6 +148,8 @@ public sealed class EditorProjectMountService(string toolVersion)
             AssetDatabase.MountWorkbook(workbook);
         return state;
     }
+
+    private OperationReport Initialize(MutationPlan plan) => _projects.Apply(plan);
 }
 
 public sealed class EditorBrowserService(IEditorAssetStatusProvider? statusProvider = null)
@@ -218,21 +260,32 @@ public sealed class EditorProjectSettingsService(string toolVersion)
     {
         ArgumentNullException.ThrowIfNull(projection);
         var fullProject = Path.GetFullPath(projectFile);
-        var root = Path.GetDirectoryName(fullProject) ?? throw new InvalidDataException("Project file has no parent.");
         var project = new ExcelDbProject(
+            ExcelDbProject.CurrentFormatVersion,
             projection.SchemaDir,
-            projection.GeneratedDir,
-            projection.Workbooks,
-            projection.BytesOutput,
-            projection.CacheDir);
+            projection.ExcelDir,
+            projection.GeneratedCSharpDir,
+            projection.GeneratedBytesDir);
+        var context = project.Resolve(fullProject);
         var currentHash = File.Exists(fullProject)
             ? ContentFingerprint.FromFile(fullProject).Sha256
             : ContentFingerprint.FromBytes(project.ToCanonicalJson()).Sha256;
-        var plan = new MutationPlanBuilder("settings-save", toolVersion, root, currentHash, projection.SchemaHash ?? 0)
-            .Observe(fullProject)
-            .WriteFile(fullProject, project.ToCanonicalJson())
+        var plan = new MutationPlanBuilder(
+                "settings-save",
+                toolVersion,
+                context.RootDirectory,
+                context.GeneratedCSharpDirectory,
+                currentHash,
+                systemCatalogHash: string.Empty,
+                projection.SchemaHash ?? 0)
+            .Observe(PlanRootKind.Project, ExcelDbProject.FileName)
+            .WriteFile(PlanRootKind.Project, ExcelDbProject.FileName, project.ToCanonicalJson())
             .Build();
-        return new MutationPlanApplier().Apply(plan);
+        var report = new MutationPlanApplier().Apply(plan);
+        if (!report.Succeeded)
+            return report;
+        var warnings = ProjectOwnedAttributes.Repair(context);
+        return warnings.IsEmpty ? report : report with { Diagnostics = report.Diagnostics.AddRange(warnings) };
     }
 }
 

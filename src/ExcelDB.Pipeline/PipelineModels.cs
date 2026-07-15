@@ -12,17 +12,26 @@ namespace ExcelDb.Pipeline;
 
 public sealed record PipelineProject(ProjectContext Context, string ConfigHash)
 {
-    public static PipelineProject Load(
-        string projectFile,
-        string? schemaDirectoryOverride = null,
-        ImmutableArray<string>? workbookOverrides = null)
+    public static PipelineProject Load(string projectFile)
     {
         var fullPath = Path.GetFullPath(projectFile);
+        var internalDirectory = Path.GetDirectoryName(fullPath)
+            ?? throw new InvalidDataException("The project file has no parent directory.");
+        if (!string.Equals(Path.GetFileName(fullPath), "project.json", StringComparison.Ordinal)
+            || !string.Equals(Path.GetFileName(internalDirectory), ".exceldb", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Project v2 configuration must be located at '<ProjectRoot>/.exceldb/project.json'.");
+        }
+        var projectRoot = Path.GetDirectoryName(internalDirectory)
+            ?? throw new InvalidDataException("The project internal directory has no parent directory.");
+        ProjectPathSafety.EnsureProjectRootAndInternalDirectoryArePlain(projectRoot);
+        if (File.Exists(Path.Combine(projectRoot, ExcelDbProject.LegacyFileName)))
+        {
+            throw new InvalidDataException(
+                $"Legacy project configuration '{ExcelDbProject.LegacyFileName}' exists beside Project v2; dual project configuration is not allowed.");
+        }
+        ProjectRecovery.EnsureRecovered(projectRoot);
         var project = ExcelDbProject.Load(fullPath);
-        if (schemaDirectoryOverride is not null)
-            project = project with { SchemaDir = schemaDirectoryOverride };
-        if (workbookOverrides is { } overrides)
-            project = project with { Workbooks = overrides };
         var configHash = ContentFingerprint.FromBytes(project.ToCanonicalJson()).Sha256;
         return new PipelineProject(project.Resolve(fullPath), configHash);
     }
@@ -32,7 +41,10 @@ public sealed record CompiledProjectSchema(
     FileDescriptorSet DescriptorSet,
     byte[] DescriptorBytes,
     CanonicalSchemaDescriptor Descriptor,
-    ImmutableArray<Diagnostic> Diagnostics);
+    ImmutableArray<Diagnostic> Diagnostics,
+    InputSetObservation? SchemaInputSet = null,
+    InputSetObservation? SystemProtoMirrorInputSet = null,
+    PathObservation? SystemImportsManifestObservation = null);
 
 public sealed record SchemaBuildOutcome(
     OperationReport Report,

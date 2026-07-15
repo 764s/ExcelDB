@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using ExcelDb.Core.IO;
 using ExcelDb.Core.Diagnostics;
 using ExcelDb.Core.Values;
@@ -9,6 +10,7 @@ using ExcelDb.Pipeline;
 using ExcelDb.Runtime.Bytes;
 using ExcelDb.Schema.Authoring;
 using ExcelDb.Schema.Compilation;
+using ExcelDb.Schema.Mutation;
 using ExcelDb.Tooling.Plans;
 using ExcelDb.Tooling.Project;
 using ExcelDb.Workbooks.Model;
@@ -32,15 +34,18 @@ public sealed class PipelineEndToEndTests : IDisposable
 
         var create = await schemaPipeline.CreateTableAsync(project, new TableCreateIntent(
             "Hero",
-            "Data/game.xlsx",
+            "Excel/game.xlsx",
             [new SimpleFieldDefinition("name", SimpleFieldType.String), new SimpleFieldDefinition("hp", SimpleFieldType.Int32)]));
         Assert.False(create.HasBlockers);
         Assert.True(MutationPlanCodec.Validate(create));
+        Assert.Contains(create.InputSets, item => item.Kind == InputSetKind.SchemaProto);
+        Assert.Contains(create.InputSets, item => item.Kind == InputSetKind.ExcelWorkbook);
+        Assert.Contains(create.InputSets, item => item.Kind == InputSetKind.SystemProtoMirror);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(create).ExitCode);
         Assert.True(File.Exists(Path.Combine(_root, "Schema", "Hero.proto")));
-        Assert.True(File.Exists(Path.Combine(_root, "Generated", "authoring", "ExcelDbSchema.Authoring.g.cs")));
+        Assert.True(File.Exists(Path.Combine(_root, "Generated", "CSharp", "Authoring", "ExcelDbSchema.Authoring.g.cs")));
 
-        var workbookPath = Path.Combine(_root, "Data", "game.xlsx");
+        var workbookPath = Path.Combine(_root, "Excel", "game.xlsx");
         AddPendingRow(workbookPath, "hero_1", "First", "10");
         var beforeCheck = ContentFingerprint.FromFile(workbookPath);
         var pendingCheck = await workbookPipeline.CheckAsync(project);
@@ -65,6 +70,8 @@ public sealed class PipelineEndToEndTests : IDisposable
         var serialized = MutationPlanCodec.Serialize(prepare);
         var replay = MutationPlanCodec.Deserialize(serialized);
         Assert.Equal(prepare.PlanHash, replay.PlanHash);
+        Assert.Contains(replay.InputSets, item => item.Kind == InputSetKind.SchemaProto);
+        Assert.Contains(replay.InputSets, item => item.Kind == InputSetKind.ExcelWorkbook);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(replay).ExitCode);
         var prepared = XlsxWorkbookCodec.Read(File.ReadAllBytes(workbookPath));
         var row = Assert.Single(Assert.Single(prepared.Tables).Rows);
@@ -79,9 +86,9 @@ public sealed class PipelineEndToEndTests : IDisposable
         Assert.Equal(0, check.PendingIdentityCount);
         Assert.Equal(0, (int)check.Report.ExitCode);
 
-        var convert = await workbookPipeline.ConvertAsync(Load(), "client", "Build/config.bytes");
+        var bytesPath = WorkbookPipeline.DefaultOutputPath(Load(), "client");
+        var convert = await workbookPipeline.ConvertAsync(Load(), "client", bytesPath);
         Assert.Equal(0, (int)convert.ExitCode);
-        var bytesPath = Path.Combine(_root, "Build", "config.bytes");
         var manifestPath = bytesPath + ".manifest.json";
         Assert.True(File.Exists(bytesPath));
         var manifest = ConvertedBytesManifest.Parse(File.ReadAllText(manifestPath));
@@ -98,7 +105,7 @@ public sealed class PipelineEndToEndTests : IDisposable
         Initialize();
         var project = Load();
         var pipeline = new SchemaPipeline("test-v1");
-        var intent = new TableCreateIntent("Hero", "Data/game.xlsx", [new SimpleFieldDefinition("name", SimpleFieldType.String)]);
+        var intent = new TableCreateIntent("Hero", "Excel/game.xlsx", [new SimpleFieldDefinition("name", SimpleFieldType.String)]);
         var first = await pipeline.CreateTableAsync(project, intent);
         var second = await pipeline.CreateTableAsync(project, intent);
         Assert.Equal(MutationPlanCodec.Serialize(first), MutationPlanCodec.Serialize(second));
@@ -109,16 +116,103 @@ public sealed class PipelineEndToEndTests : IDisposable
     }
 
     [Fact]
+    public async Task Generate_without_workbooks_creates_the_shared_default_workbook_for_live_tables()
+    {
+        Initialize();
+        var schemaPath = Path.Combine(_root, "Schema", "catalog.proto");
+        File.WriteAllText(schemaPath, """
+            syntax = "proto3";
+            package game;
+            import "exceldb/options.proto";
+            message Hero {
+              option (exceldb.table) = { kind: ASSET, id: 101 };
+              string id = 1 [(exceldb.field) = { key: 1 }];
+            }
+            message Item {
+              option (exceldb.table) = { kind: ASSET, id: 102 };
+              string id = 1 [(exceldb.field) = { key: 1 }];
+            }
+            """, new UTF8Encoding(false));
+        var schemas = new SchemaPipeline("test-v1");
+        var build = await schemas.BuildAsync(Load(), checkOnly: false);
+        Assert.NotNull(build.Plan);
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(build.Plan).ExitCode);
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(_root, "Excel"), "*.xlsx", SearchOption.AllDirectories));
+        var schemaBefore = File.ReadAllBytes(schemaPath);
+        var pipeline = new WorkbookPipeline("test-v1", schemas);
+
+        var generate = await pipeline.GenerateAsync(Load());
+
+        Assert.False(generate.HasBlockers, string.Join(
+            Environment.NewLine,
+            generate.Diagnostics.Select(static item => $"{item.Code}: {item.Message}")));
+        Assert.Contains(generate.Mutations, mutation =>
+            mutation.Root == PlanRootKind.Project
+            && mutation.Kind == FileMutationKind.WriteFile
+            && mutation.RelativePath.Replace('\\', '/') == "Excel/game.xlsx");
+        Assert.DoesNotContain(generate.Mutations, mutation =>
+            mutation.Root == PlanRootKind.Project
+            && mutation.RelativePath.Replace('\\', '/').StartsWith("Generated/Bytes/", StringComparison.Ordinal));
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(generate).ExitCode);
+
+        var workbookPath = Path.Combine(_root, "Excel", ProjectArtifactPaths.DefaultWorkbookFileName);
+        var workbook = XlsxWorkbookCodec.Read(File.ReadAllBytes(workbookPath));
+        Assert.Equal([101, 102], workbook.Tables.Select(static table => table.TableId).ToArray());
+        Assert.All(workbook.Tables, static table => Assert.Empty(table.Rows));
+        Assert.Equal(schemaBefore, File.ReadAllBytes(schemaPath));
+        Assert.False(File.Exists(Path.Combine(_root, "Generated", "Bytes", "client", "config.bytes")));
+    }
+
+    [Fact]
+    public async Task ExternalConvert_RevalidatesSystemImportsManifestBeforeWriting()
+    {
+        Initialize();
+        var schemas = new SchemaPipeline("test-v1");
+        var create = await schemas.CreateTableAsync(
+            Load(),
+            new TableCreateIntent(
+                "Hero",
+                "Excel/game.xlsx",
+                [new SimpleFieldDefinition("name", SimpleFieldType.String)]));
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(create).ExitCode);
+        var external = Path.Combine(Path.GetTempPath(), $"exceldb-input-race-{Guid.NewGuid():N}");
+        var output = Path.Combine(external, "config.bytes");
+        var pipeline = new WorkbookPipeline("test-v1", schemas)
+        {
+            BeforeExternalInputRevalidation = () =>
+                File.AppendAllText(
+                    Path.Combine(_root, ".exceldb", "system-imports.json"),
+                    " ",
+                    new UTF8Encoding(false)),
+        };
+
+        try
+        {
+            var report = await pipeline.ConvertAsync(Load(), "client", output);
+
+            Assert.False(report.Succeeded);
+            Assert.Contains(report.Diagnostics, diagnostic => diagnostic.Code == "plan.stale-input-set");
+            Assert.False(File.Exists(output));
+            Assert.False(File.Exists(output + ".manifest.json"));
+        }
+        finally
+        {
+            if (Directory.Exists(external))
+                Directory.Delete(external, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task DiffReportsAddedRemovedRenamedMovedAndFieldChanges()
     {
         Initialize();
         var project = Load();
         var schemas = new SchemaPipeline("test-v1");
-        var create = await schemas.CreateTableAsync(project, new TableCreateIntent("Hero", "Data/game.xlsx", [new SimpleFieldDefinition("name", SimpleFieldType.String)]));
+        var create = await schemas.CreateTableAsync(project, new TableCreateIntent("Hero", "Excel/game.xlsx", [new SimpleFieldDefinition("name", SimpleFieldType.String)]));
         new MutationPlanApplier().Apply(create);
-        var leftPath = Path.Combine(_root, "Data", "left.xlsx");
-        var rightPath = Path.Combine(_root, "Data", "right.xlsx");
-        var baseline = XlsxWorkbookCodec.Read(File.ReadAllBytes(Path.Combine(_root, "Data", "game.xlsx")));
+        var leftPath = Path.Combine(_root, "Excel", "left.xlsx");
+        var rightPath = Path.Combine(_root, "Excel", "right.xlsx");
+        var baseline = XlsxWorkbookCodec.Read(File.ReadAllBytes(Path.Combine(_root, "Excel", "game.xlsx")));
         var guidA = ExcelDb.Core.Identity.RowGuid.New();
         var guidB = ExcelDb.Core.Identity.RowGuid.New();
         var table = Assert.Single(baseline.Tables);
@@ -167,7 +261,7 @@ public sealed class PipelineEndToEndTests : IDisposable
         Assert.NotNull(build.Plan);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(build.Plan).ExitCode);
 
-        var workbookPath = Path.Combine(_root, "Data", "references.xlsx");
+        var workbookPath = Path.Combine(_root, "Excel", "references.xlsx");
         var workbooks = new WorkbookPipeline("test-v1", schemas);
         var generate = await workbooks.GenerateAsync(Load(), workbookPath);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(generate).ExitCode);
@@ -200,9 +294,9 @@ public sealed class PipelineEndToEndTests : IDisposable
         Assert.False(check.Report.Diagnostics.Any(static item => item.IsFailure),
             string.Join(Environment.NewLine, check.Report.Diagnostics.Select(static item => $"{item.Code}: {item.Message}")));
         Assert.Equal(0, (int)check.Report.ExitCode);
-        var convert = await workbooks.ConvertAsync(Load(), "client", "Build/references.bytes");
+        var bytesPath = WorkbookPipeline.DefaultOutputPath(Load(), "client");
+        var convert = await workbooks.ConvertAsync(Load(), "client", bytesPath);
         Assert.Equal(0, (int)convert.ExitCode);
-        var bytesPath = Path.Combine(_root, "Build", "references.bytes");
         using (var snapshot = ConvertedBytesReader.Read(
                    File.ReadAllBytes(bytesPath),
                    File.ReadAllText(bytesPath + ".manifest.json")).Snapshot)
@@ -226,7 +320,7 @@ public sealed class PipelineEndToEndTests : IDisposable
             }
             : table).ToImmutableArray();
         File.WriteAllBytes(workbookPath, XlsxWorkbookCodec.Write(changed with { Tables = changedTables }));
-        var dangling = await workbooks.ConvertAsync(Load(), "client", "Build/references.bytes");
+        var dangling = await workbooks.ConvertAsync(Load(), "client", bytesPath);
         Assert.Equal(2, (int)dangling.ExitCode);
         Assert.Contains(dangling.Diagnostics, static diagnostic => diagnostic.Code == "ref.unresolved");
         Assert.Equal(beforeFailure, ContentFingerprint.FromFile(bytesPath));
@@ -250,7 +344,7 @@ public sealed class PipelineEndToEndTests : IDisposable
         var pipeline = new SchemaPipeline("test-v1");
         var initial = await pipeline.BuildAsync(Load(), checkOnly: false);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(initial.Plan!).ExitCode);
-        var serverDirectory = Path.Combine(_root, "Generated", "runtime", "server");
+        var serverDirectory = Path.Combine(_root, "Generated", "CSharp", "Runtime", "server");
         Assert.NotEmpty(Directory.GetFiles(serverDirectory, "*.g.cs", SearchOption.AllDirectories));
 
         File.WriteAllText(protoPath, """
@@ -270,10 +364,10 @@ public sealed class PipelineEndToEndTests : IDisposable
         var rebuild = await pipeline.BuildAsync(Load(), checkOnly: false);
         Assert.Contains(rebuild.Plan!.Mutations, mutation =>
             mutation.Kind == FileMutationKind.DeleteFile
-            && mutation.RelativePath.Contains("runtime/server", StringComparison.Ordinal));
+            && mutation.RelativePath.Contains("Runtime/server", StringComparison.Ordinal));
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(rebuild.Plan).ExitCode);
         Assert.Empty(Directory.GetFiles(serverDirectory, "*.g.cs", SearchOption.AllDirectories));
-        Assert.NotEmpty(Directory.GetFiles(Path.Combine(_root, "Generated", "runtime", "client"), "*.g.cs", SearchOption.AllDirectories));
+        Assert.NotEmpty(Directory.GetFiles(Path.Combine(_root, "Generated", "CSharp", "Runtime", "client"), "*.g.cs", SearchOption.AllDirectories));
     }
 
     [Fact]
@@ -293,7 +387,7 @@ public sealed class PipelineEndToEndTests : IDisposable
         var build = await schemas.BuildAsync(Load(), checkOnly: false);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(build.Plan!).ExitCode);
 
-        var workbookPath = Path.Combine(_root, "Data", "validated.xlsx");
+        var workbookPath = Path.Combine(_root, "Excel", "validated.xlsx");
         var plain = new WorkbookPipeline("test-v1", schemas);
         var generate = await plain.GenerateAsync(Load(), workbookPath);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(generate).ExitCode);
@@ -308,9 +402,10 @@ public sealed class PipelineEndToEndTests : IDisposable
         var check = await pipeline.CheckAsync(Load());
         Assert.Contains(check.Report.Diagnostics, static diagnostic => diagnostic.Code == "test.reject-key");
         Assert.Equal(1, (int)check.Report.ExitCode);
-        var convert = await pipeline.ConvertAsync(Load(), "client", "Build/validated.bytes");
+        var bytesPath = WorkbookPipeline.DefaultOutputPath(Load(), "client");
+        var convert = await pipeline.ConvertAsync(Load(), "client", bytesPath);
         Assert.Equal(1, (int)convert.ExitCode);
-        Assert.False(File.Exists(Path.Combine(_root, "Build", "validated.bytes")));
+        Assert.False(File.Exists(bytesPath));
     }
 
     [Fact]
@@ -334,7 +429,7 @@ public sealed class PipelineEndToEndTests : IDisposable
         Assert.NotNull(build.Plan);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(build.Plan).ExitCode);
 
-        var workbookPath = Path.Combine(_root, "Data", "targets.xlsx");
+        var workbookPath = Path.Combine(_root, "Excel", "targets.xlsx");
         var pipeline = new WorkbookPipeline("test-v1", schemas);
         var generate = await pipeline.GenerateAsync(Load(), workbookPath);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(generate).ExitCode);
@@ -358,9 +453,9 @@ public sealed class PipelineEndToEndTests : IDisposable
             Tables = [table with { Rows = [row] }],
         }));
 
-        var first = await pipeline.ConvertAsync(Load(), "client", "Build/target-client.bytes");
+        var bytesPath = WorkbookPipeline.DefaultOutputPath(Load(), "client");
+        var first = await pipeline.ConvertAsync(Load(), "client", bytesPath);
         Assert.Equal(0, (int)first.ExitCode);
-        var bytesPath = Path.Combine(_root, "Build", "target-client.bytes");
         var firstBytes = File.ReadAllBytes(bytesPath);
         var firstManifest = File.ReadAllBytes(bytesPath + ".manifest.json");
 
@@ -374,14 +469,14 @@ public sealed class PipelineEndToEndTests : IDisposable
         changedPackage = AddOpaquePart(changedPackage, "custom/free-sheet-content.xml", Encoding.UTF8.GetBytes("<note>unowned</note>"));
         File.WriteAllBytes(workbookPath, changedPackage);
 
-        var second = await pipeline.ConvertAsync(Load(), "client", "Build/target-client.bytes");
+        var second = await pipeline.ConvertAsync(Load(), "client", bytesPath);
         Assert.Equal(0, (int)second.ExitCode);
         Assert.Equal(firstBytes, File.ReadAllBytes(bytesPath));
         Assert.Equal(firstManifest, File.ReadAllBytes(bytesPath + ".manifest.json"));
     }
 
     [Fact]
-    public async Task RekeyNeverReplacesRowIdentity()
+    public async Task RegenerateRejectsRekeyAndPreservesBusinessIdentityAndCells()
     {
         Initialize();
         File.WriteAllText(Path.Combine(_root, "Schema", "rekey.proto"), """
@@ -402,7 +497,7 @@ public sealed class PipelineEndToEndTests : IDisposable
         var build = await schemas.BuildAsync(Load(), checkOnly: false);
         Assert.NotNull(build.Plan);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(build.Plan).ExitCode);
-        var workbookPath = Path.Combine(_root, "Data", "rekey.xlsx");
+        var workbookPath = Path.Combine(_root, "Excel", "rekey.xlsx");
         var pipeline = new WorkbookPipeline("test-v1", schemas);
         var generated = await pipeline.GenerateAsync(Load(), workbookPath);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(generated).ExitCode);
@@ -449,16 +544,17 @@ public sealed class PipelineEndToEndTests : IDisposable
             File.ReadAllBytes(workbookPath),
             [new CellPatch(itemTable.SheetName, itemTable.DataStartRow, businessKeyColumn, new WorkbookCell("blade"))]));
         var rekey = await pipeline.GenerateAsync(Load(), rekey: true);
-        Assert.False(rekey.HasBlockers, string.Join(Environment.NewLine, rekey.Diagnostics.Select(static item => item.Message)));
-        Assert.Equal(0, (int)new MutationPlanApplier().Apply(rekey).ExitCode);
+        Assert.True(rekey.HasBlockers);
+        Assert.Equal(2, (int)new MutationPlanApplier().Apply(rekey).ExitCode);
 
         var after = XlsxWorkbookCodec.Read(File.ReadAllBytes(workbookPath));
         var item = Assert.Single(after.Tables.Single(static table => table.TableId == 401).Rows);
         var holder = Assert.Single(after.Tables.Single(static table => table.TableId == 402).Rows);
         Assert.Equal(itemGuid, item.RowGuid);
         Assert.Equal(holderGuid, holder.RowGuid);
-        Assert.Equal(CanonicalKeyCodec.Format(["blade"]), item.Key);
-        Assert.Equal("401:blade", holder.Cells[holderRefProperty].Text);
+        Assert.Equal("blade", item.Cells[itemKeyProperty].Text);
+        Assert.Equal(CanonicalKeyCodec.Format(["sword"]), item.Key);
+        Assert.Equal("401:sword", holder.Cells[holderRefProperty].Text);
     }
 
     [Fact]
@@ -480,7 +576,7 @@ public sealed class PipelineEndToEndTests : IDisposable
         var build = await schemas.BuildAsync(Load(), checkOnly: false);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(build.Plan!).ExitCode);
         var workbooks = new WorkbookPipeline("test-v1", schemas);
-        var workbookPath = Path.Combine(_root, "Data", "nested.xlsx");
+        var workbookPath = Path.Combine(_root, "Excel", "nested.xlsx");
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(
             await workbooks.GenerateAsync(Load(), workbookPath)).ExitCode);
 
@@ -501,9 +597,9 @@ public sealed class PipelineEndToEndTests : IDisposable
             Tables = [table with { Rows = [row] }],
         }));
 
-        var report = await workbooks.ConvertAsync(Load(), "client", "Build/nested.bytes");
+        var output = WorkbookPipeline.DefaultOutputPath(Load(), "client");
+        var report = await workbooks.ConvertAsync(Load(), "client", output);
         Assert.Equal(0, (int)report.ExitCode);
-        var output = Path.Combine(_root, "Build", "nested.bytes");
         using var snapshot = ConvertedBytesReader.Read(
             File.ReadAllBytes(output),
             File.ReadAllText(output + ".manifest.json")).Snapshot;
@@ -532,7 +628,7 @@ public sealed class PipelineEndToEndTests : IDisposable
         var build = await schemas.BuildAsync(Load(), checkOnly: false);
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(build.Plan!).ExitCode);
         var workbooks = new WorkbookPipeline("test-v1", schemas);
-        var workbookPath = Path.Combine(_root, "Data", "children.xlsx");
+        var workbookPath = Path.Combine(_root, "Excel", "children.xlsx");
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(
             await workbooks.GenerateAsync(Load(), workbookPath)).ExitCode);
 
@@ -585,9 +681,9 @@ public sealed class PipelineEndToEndTests : IDisposable
             ChildTables = children,
         }));
 
-        var report = await workbooks.ConvertAsync(Load(), "client", "Build/children.bytes");
+        var output = WorkbookPipeline.DefaultOutputPath(Load(), "client");
+        var report = await workbooks.ConvertAsync(Load(), "client", output);
         Assert.Equal(0, (int)report.ExitCode);
-        var output = Path.Combine(_root, "Build", "children.bytes");
         using var snapshot = ConvertedBytesReader.Read(
             File.ReadAllBytes(output),
             File.ReadAllText(output + ".manifest.json")).Snapshot;
@@ -608,7 +704,7 @@ public sealed class PipelineEndToEndTests : IDisposable
         var schemas = new SchemaPipeline("test-v1");
         var create = await schemas.CreateTableAsync(project, new TableCreateIntent(
             "Hero",
-            "Data/history.xlsx",
+            "Excel/history.xlsx",
             [new SimpleFieldDefinition("name", SimpleFieldType.String)]));
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(create).ExitCode);
         var workbooks = new WorkbookPipeline("test-v1", schemas);
@@ -625,11 +721,13 @@ public sealed class PipelineEndToEndTests : IDisposable
         var publish = await compatibility.CreatePublishPlanAsync(Load());
         Assert.False(publish.HasBlockers, string.Join(Environment.NewLine, publish.Diagnostics.Select(static item => item.Message)));
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(publish).ExitCode);
+        Assert.True(File.Exists(Path.Combine(_root, ".exceldb", "published", PublishedSchemaHistoryStore.IndexFileName)));
+        Assert.False(Directory.Exists(Path.Combine(_root, "Schema", ".exceldb-history")));
         var history = PublishedSchemaHistoryStore.LoadLatest(Load());
         Assert.True(history.IsValid, string.Join(Environment.NewLine, history.Diagnostics.Select(static item => item.Message)));
         Assert.NotNull(history.Latest);
 
-        var cacheDescriptor = Path.Combine(_root, ".exceldb", "schema", "descriptor.pb");
+        var cacheDescriptor = Path.Combine(_root, ".exceldb", "cache", "schema", "descriptor.pb");
         File.Delete(cacheDescriptor);
         history = PublishedSchemaHistoryStore.LoadLatest(Load());
         Assert.True(history.IsValid, string.Join(Environment.NewLine, history.Diagnostics.Select(static item => item.Message)));
@@ -656,6 +754,135 @@ public sealed class PipelineEndToEndTests : IDisposable
         Assert.Empty(rejected.Mutations);
     }
 
+    [Theory]
+    [InlineData("tampered")]
+    [InlineData("missing")]
+    [InlineData("unknown-ownership")]
+    public async Task PublishBlocksGeneratedCSharpThatDoesNotExactlyMatchCurrentGenerator(
+        string failure)
+    {
+        var (schemas, _) = await PreparePublishReadyProjectAsync();
+        var generatedPath = Path.Combine(
+            _root,
+            "Generated",
+            "CSharp",
+            "Authoring",
+            "ExcelDbSchema.Authoring.g.cs");
+        var manifestPath = Path.Combine(_root, "Generated", "CSharp", "codegen.manifest.json");
+        switch (failure)
+        {
+            case "tampered":
+                File.AppendAllText(generatedPath, "// user edit\n", new UTF8Encoding(false));
+                break;
+            case "missing":
+                File.Delete(generatedPath);
+                break;
+            case "unknown-ownership":
+                var manifest = File.ReadAllText(manifestPath);
+                File.WriteAllText(
+                    manifestPath,
+                    manifest.Replace(
+                        "Authoring/ExcelDbSchema.Authoring.g.cs",
+                        "Authoring/Unowned.g.cs",
+                        StringComparison.Ordinal),
+                    new UTF8Encoding(false));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(failure));
+        }
+
+        var publish = await new CompatibilityPipeline("test-v1", schemas).CreatePublishPlanAsync(Load());
+
+        Assert.True(publish.HasBlockers);
+        Assert.Contains(
+            publish.Diagnostics,
+            diagnostic => diagnostic.Code is "compat.publish.generated-invalid" or "compat.publish.generated-ownership");
+        Assert.DoesNotContain(
+            publish.Mutations,
+            mutation => NormalizePath(mutation.RelativePath).StartsWith(".exceldb/published/", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Publish_blocks_bytes_that_predate_the_current_excel_data()
+    {
+        var (_, compatibility) = await PreparePublishReadyProjectAsync();
+        var workbookPath = Path.Combine(_root, "Excel", "history.xlsx");
+        var workbook = XlsxWorkbookCodec.Read(File.ReadAllBytes(workbookPath));
+        var table = Assert.Single(workbook.Tables);
+        var idProperty = table.Columns.Single(static column => column.FieldPath == "1").PropertyPath;
+        var nameProperty = table.Columns.Single(static column => column.FieldPath == "2").PropertyPath;
+        var row = WorkbookRow.Create(
+            ExcelDb.Core.Identity.RowGuid.Parse("00000000000000000000000000000101"),
+            1,
+            [
+                new KeyValuePair<string, WorkbookCell>(idProperty, new WorkbookCell("hero")),
+                new KeyValuePair<string, WorkbookCell>(nameProperty, new WorkbookCell("Changed after convert")),
+            ],
+            CanonicalKeyCodec.Format(["hero"]));
+        File.WriteAllBytes(
+            workbookPath,
+            XlsxWorkbookCodec.Write(workbook with { Tables = [table with { Rows = [row] }] }));
+
+        var publish = await compatibility.CreatePublishPlanAsync(Load());
+
+        Assert.True(publish.HasBlockers);
+        Assert.Contains(
+            publish.Diagnostics,
+            diagnostic => diagnostic.Code == "compat.publish.target-artifact"
+                          && diagnostic.Message.Contains("stale", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            publish.Mutations,
+            mutation => NormalizePath(mutation.RelativePath).StartsWith(".exceldb/published/", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("generated-csharp")]
+    [InlineData("codegen-manifest")]
+    [InlineData("bytes")]
+    [InlineData("bytes-manifest")]
+    [InlineData("published-index")]
+    [InlineData("published-descriptor")]
+    public async Task PublishPlanBecomesStaleWhenAnyFrozenGateEvidenceChanges(string evidence)
+    {
+        var (_, compatibility) = await PrepareInitiallyPublishedEvolutionAsync();
+        var project = Load();
+        var plan = await compatibility.CreatePublishPlanAsync(project);
+        Assert.False(plan.HasBlockers, string.Join(Environment.NewLine, plan.Diagnostics.Select(static item => item.Message)));
+        var indexPath = PublishedSchemaHistoryStore.IndexPath(project);
+        var entryCountBefore = PublishedEntryCount(indexPath);
+        var nextDescriptor = plan.Mutations
+            .Where(static mutation => mutation.Kind == FileMutationKind.WriteFile)
+            .Select(static mutation => mutation.RelativePath)
+            .Single(path => NormalizePath(path).StartsWith(".exceldb/published/descriptor-", StringComparison.Ordinal));
+        var nextDescriptorPath = Path.Combine(_root, nextDescriptor.Replace('/', Path.DirectorySeparatorChar));
+        Assert.False(File.Exists(nextDescriptorPath));
+
+        var latest = PublishedSchemaHistoryStore.LoadLatest(project).Latest!;
+        var path = evidence switch
+        {
+            "generated-csharp" => Path.Combine(
+                _root,
+                "Generated",
+                "CSharp",
+                "Authoring",
+                "ExcelDbSchema.Authoring.g.cs"),
+            "codegen-manifest" => Path.Combine(_root, "Generated", "CSharp", "codegen.manifest.json"),
+            "bytes" => WorkbookPipeline.DefaultOutputPath(project, "client"),
+            "bytes-manifest" => WorkbookPipeline.DefaultOutputPath(project, "client") + ".manifest.json",
+            "published-index" => indexPath,
+            "published-descriptor" => latest.DescriptorPath,
+            _ => throw new ArgumentOutOfRangeException(nameof(evidence)),
+        };
+        using (var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.None))
+            stream.WriteByte((byte)' ');
+
+        var report = new MutationPlanApplier().Apply(plan);
+
+        Assert.Equal(2, (int)report.ExitCode);
+        Assert.False(File.Exists(nextDescriptorPath));
+        Assert.Equal(entryCountBefore, PublishedEntryCount(indexPath));
+    }
+
     [Fact]
     public async Task RealXlsxMigrationStagesVerifiesCommitsAndPersistsItsMarker()
     {
@@ -669,7 +896,7 @@ public sealed class PipelineEndToEndTests : IDisposable
         Assert.True(sourceCompilation.Succeeded);
         var sourceSchema = sourceCompilation.Descriptor!;
         var workbooks = new WorkbookPipeline("test-v1", schemas);
-        var workbookPath = Path.Combine(_root, "Data", "migration.xlsx");
+        var workbookPath = Path.Combine(_root, "Excel", "migration.xlsx");
         Assert.Equal(0, (int)new MutationPlanApplier().Apply(
             await workbooks.GenerateAsync(Load(), workbookPath)).ExitCode);
         var workbook = XlsxWorkbookCodec.Read(File.ReadAllBytes(workbookPath));
@@ -723,6 +950,61 @@ public sealed class PipelineEndToEndTests : IDisposable
           {{(includeTarget ? "string new_name = 3;" : string.Empty)}}
         }
         """;
+
+    private async Task<(SchemaPipeline Schemas, CompatibilityPipeline Compatibility)> PreparePublishReadyProjectAsync()
+    {
+        Initialize();
+        var schemas = new SchemaPipeline("test-v1");
+        var create = await schemas.CreateTableAsync(Load(), new TableCreateIntent(
+            "Hero",
+            "Excel/history.xlsx",
+            [new SimpleFieldDefinition("name", SimpleFieldType.String)]));
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(create).ExitCode);
+        var workbooks = new WorkbookPipeline("test-v1", schemas);
+        foreach (var target in new[] { "client", "server" })
+        {
+            var conversion = await workbooks.ConvertAsync(
+                Load(),
+                target,
+                WorkbookPipeline.DefaultOutputPath(Load(), target));
+            Assert.Equal(0, (int)conversion.ExitCode);
+        }
+        return (schemas, new CompatibilityPipeline("test-v1", schemas));
+    }
+
+    private async Task<(SchemaPipeline Schemas, CompatibilityPipeline Compatibility)> PrepareInitiallyPublishedEvolutionAsync()
+    {
+        var (schemas, compatibility) = await PreparePublishReadyProjectAsync();
+        var firstPublish = await compatibility.CreatePublishPlanAsync(Load());
+        Assert.False(firstPublish.HasBlockers, string.Join(Environment.NewLine, firstPublish.Diagnostics.Select(static item => item.Message)));
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(firstPublish).ExitCode);
+
+        var edit = await schemas.EditTableAsync(Load(), new TableEditIntent(
+            "game.configs.Hero",
+            [new AddSimpleFieldMutation(new SimpleFieldDefinition("title", SimpleFieldType.String))],
+            [],
+            []));
+        Assert.False(edit.HasBlockers, string.Join(Environment.NewLine, edit.Diagnostics.Select(static item => item.Message)));
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(edit).ExitCode);
+        var workbooks = new WorkbookPipeline("test-v1", schemas);
+        foreach (var target in new[] { "client", "server" })
+        {
+            var conversion = await workbooks.ConvertAsync(
+                Load(),
+                target,
+                WorkbookPipeline.DefaultOutputPath(Load(), target));
+            Assert.Equal(0, (int)conversion.ExitCode);
+        }
+        return (schemas, compatibility);
+    }
+
+    private static int PublishedEntryCount(string indexPath)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllBytes(indexPath));
+        return document.RootElement.GetProperty("entries").GetArrayLength();
+    }
+
+    private static string NormalizePath(string path) => path.Replace('\\', '/');
 
     private void Initialize()
     {

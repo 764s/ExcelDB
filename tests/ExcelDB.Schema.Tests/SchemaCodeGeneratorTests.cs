@@ -28,8 +28,9 @@ public sealed class SchemaCodeGeneratorTests
         Assert.True(compilation.Succeeded, Describe(compilation));
 
         var generator = new SchemaCodeGenerator();
-        var first = generator.Generate(compilation.Descriptor!);
-        var second = generator.Generate(compilation.Descriptor!);
+        var catalogHash = PackageSystemProtoCatalog.Default.CatalogHash;
+        var first = generator.Generate(compilation.Descriptor!, catalogHash);
+        var second = generator.Generate(compilation.Descriptor!, catalogHash);
 
         Assert.Equal(first.Manifest, second.Manifest);
         Assert.Equal(first.Artifacts.ToArray(), second.Artifacts.ToArray());
@@ -37,6 +38,32 @@ public sealed class SchemaCodeGeneratorTests
         Assert.Contains("exceldb.codegen-manifest.v1", first.Manifest.Json, StringComparison.Ordinal);
         Assert.Equal(64, first.Manifest.CodegenHash.Length);
         Assert.Equal(64, first.Manifest.ManifestHash.Length);
+        Assert.Equal(catalogHash, first.Manifest.CatalogHash);
+        Assert.Contains($"\"catalogHash\":\"{catalogHash}\"", first.Manifest.Json, StringComparison.Ordinal);
+        Assert.All(first.Artifacts, static artifact =>
+            Assert.True(
+                artifact.RelativePath.StartsWith("Authoring/", StringComparison.Ordinal)
+                || artifact.RelativePath.StartsWith("Runtime/", StringComparison.Ordinal),
+                $"Unexpected generated path: {artifact.RelativePath}"));
+        Assert.Contains(first.Artifacts, static artifact =>
+            artifact.RelativePath == "Authoring/ExcelDbSchema.Authoring.g.cs");
+        Assert.Contains(first.Artifacts, static artifact =>
+            artifact.RelativePath.StartsWith("Runtime/client/", StringComparison.Ordinal));
+        Assert.Contains("\"path\":\"Authoring/", first.Manifest.Json, StringComparison.Ordinal);
+        Assert.Contains("\"path\":\"Runtime/client/", first.Manifest.Json, StringComparison.Ordinal);
+
+        var outputRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), $"exceldb-path-test-{Guid.NewGuid():N}"));
+        var rootPrefix = Path.TrimEndingDirectorySeparator(outputRoot) + Path.DirectorySeparatorChar;
+        Assert.All(first.Artifacts, artifact =>
+        {
+            var physical = Path.GetFullPath(
+                Path.Combine(outputRoot, artifact.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
+            Assert.StartsWith(rootPrefix, physical, StringComparison.OrdinalIgnoreCase);
+        });
+
+        var invalidTable = compilation.Descriptor!.Tables[0] with { ExportTargets = ["../server"] };
+        var invalidDescriptor = compilation.Descriptor with { Tables = [invalidTable] };
+        Assert.Throws<InvalidDataException>(() => generator.Generate(invalidDescriptor, catalogHash));
 
         var client = Assert.Single(first.Artifacts, artifact =>
             artifact.Kind == "runtime-csharp" && artifact.ExportTarget == "client");

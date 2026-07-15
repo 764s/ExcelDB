@@ -1,3 +1,7 @@
-using ExcelDb.Cli;
+namespace ExcelDb.Cli;
 
-return await ExcelDbToolHost.RunAsync(args).ConfigureAwait(false);
+public static class Program
+{
+    [STAThread]
+    public static Task<int> Main(string[] args) => ExcelDbToolHost.RunAsync(args);
+}

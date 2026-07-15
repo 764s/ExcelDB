@@ -41,8 +41,8 @@ internal sealed class ExcelDbBrowserWindow : EditorWindow
         }
         if (!bridge.HasProject)
         {
-            EditorGUILayout.HelpBox("No ExcelDb.Project.json is mounted.", MessageType.Info);
-            if (GUILayout.Button("Initialize Project with the shared C1 plan"))
+            EditorGUILayout.HelpBox("No ExcelDB Project v2 is initialized.", MessageType.Info);
+            if (GUILayout.Button("Initialize ExcelDB Project"))
                 bridge.InitializeProject();
             return;
         }
@@ -88,7 +88,7 @@ internal sealed class ExcelDbBrowserWindow : EditorWindow
     {
         using (new EditorGUILayout.VerticalScope(GUILayout.Width(Math.Max(180, position.width * .24f))))
         {
-            EditorGUILayout.LabelField("Workbooks / Tables", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Excel / Tables", EditorStyles.boldLabel);
             _treeScroll = EditorGUILayout.BeginScrollView(_treeScroll);
             foreach (var workbook in bridge.MountedWorkbooks)
             {
@@ -193,7 +193,6 @@ internal sealed class ExcelDbBrowserWindow : EditorWindow
         var menu = new GenericMenu();
         menu.AddItem(new GUIContent("Open in Excel"), false, () => bridge.OpenWorkbook(workbook));
         menu.AddItem(new GUIContent("Unmount/Session only"), false, () => Unmount(bridge, workbook, false));
-        menu.AddItem(new GUIContent("Unmount/Remove from Project json"), false, () => Unmount(bridge, workbook, true));
         menu.ShowAsContext();
     }
 
@@ -225,23 +224,19 @@ internal sealed class ExcelDbPlanWindow : EditorWindow
 {
     private string _operation = string.Empty;
     private UnityEditorPlanView _plan;
-    private bool _purge;
-    private bool _rekey;
     private Vector2 _scroll;
 
     public static void ShowPlan(string operation)
     {
         var window = GetWindow<ExcelDbPlanWindow>("ExcelDB Plan");
         window._operation = operation;
-        window._purge = false;
-        window._rekey = false;
         window.Rebuild();
     }
 
     private void Rebuild()
     {
         var bridge = ExcelDbUnityEditorBridge.Current;
-        _plan = bridge == null ? default(UnityEditorPlanView) : bridge.BuildPlan(_operation, _purge, _rekey);
+        _plan = bridge == null ? default(UnityEditorPlanView) : bridge.BuildPlan(_operation);
     }
 
     private void OnGUI()
@@ -249,11 +244,6 @@ internal sealed class ExcelDbPlanWindow : EditorWindow
         EditorGUILayout.LabelField(_plan.Operation ?? _operation, EditorStyles.boldLabel);
         EditorGUILayout.LabelField("Plan hash");
         EditorGUILayout.SelectableLabel(_plan.PlanHash ?? string.Empty, GUILayout.Height(EditorGUIUtility.singleLineHeight));
-        EditorGUI.BeginChangeCheck();
-        _purge = EditorGUILayout.Toggle("Purge", _purge);
-        _rekey = EditorGUILayout.Toggle("Rekey", _rekey);
-        if (EditorGUI.EndChangeCheck())
-            Rebuild();
         _scroll = EditorGUILayout.BeginScrollView(_scroll);
         DrawSection("Source fingerprints", _plan.Sources);
         DrawSection("Deterministic mutations", _plan.Mutations);

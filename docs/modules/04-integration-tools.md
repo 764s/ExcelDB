@@ -99,7 +99,7 @@
 ### 3.3 设置与初始化窗口
 
 - 初始化窗口明确显示 Project 根和 Generated C# 输出位置，后者提供文件夹选择；摘要预览四类真实路径、外部目录警告和完整 MutationPlan。
-- 项目设置重点编辑 Generated C# 输出；其他三个目录显示解析后的高级路径并可编辑。保存走 `PlanConfigure`，只替换 `.exceldb/project.json`。
+- 项目设置重点编辑 Generated C# 输出；其他三个目录显示解析后的高级路径并可编辑。保存走同一个 `PlanConfigure`：写入 `.exceldb/project.json`，并补齐新声明根所需的目录、`Schema/.gitignore`、系统 proto 编辑镜像及其所有权记录；不得搬运或删除旧根中的用户工件，也不得重跑表初始化器或导出目标策略。
 - 打开目录/配置/报告使用 shell 只读跳转；路径不存在时给出原因，不为“打开”动作暗中创建目录。
 
 ## 4. 共享 application service
@@ -110,18 +110,22 @@ Hub 与 CLI 共用 typed 服务；宿主可以增加 adapter，但不得改变�
 public interface IExcelDbProjectService
 {
     ProjectInspection Inspect(ProjectLocation project);
+    OperationReport RepairProjectOwnedAttributes(ProjectLocation project);
     MutationPlan PlanInitialize(InitializeProjectRequest request);
     MutationPlan PlanConfigure(ConfigureProjectRequest request);
-    MutationPlan PlanCreateTable(CreateTableRequest request);
-    MutationPlan PlanEditTable(EditTableRequest request);
-    MutationPlan PlanRegenerate(RegenerateRequest request);
-    MutationPlan PlanDataPrepare(DataPrepareRequest request);
+    Task<MutationPlan> PlanCreateTableAsync(CreateTableRequest request, CancellationToken cancellationToken = default);
+    Task<MutationPlan> PlanEditTableAsync(EditTableRequest request, CancellationToken cancellationToken = default);
+    Task<MutationPlan> PlanRegenerateAsync(RegenerateRequest request, CancellationToken cancellationToken = default);
+    Task<MutationPlan> PlanDataPrepareAsync(DataPrepareRequest request, CancellationToken cancellationToken = default);
     MutationPlan PlanRepairSystemImports(RepairSystemImportsRequest request);
-    OperationReport Check(CheckRequest request);
-    OperationReport Convert(ConvertRequest request);
+    Task<OperationReport> CheckAsync(CheckRequest request, CancellationToken cancellationToken = default);
+    Task<OperationReport> ConvertAsync(ConvertRequest request, CancellationToken cancellationToken = default);
+    OperationReport CleanCache(ProjectLocation project);
     OperationReport Apply(MutationPlan plan);
 }
 ```
+
+`Inspect` 始终只读；Project Hub 在识别出有效 Project 后另行调用 `RepairProjectOwnedAttributes`，只幂等修复工具自有的 Windows Hidden/ReadOnly 属性。CLI `project inspect` 不调用该修复入口。
 
 `ProjectInspection` 至少包含 Project 根、四类已解析路径、配置/legacy 状态、系统 import 状态、每类摘要、最近报告/恢复提示和各动作可用性。`ProjectStatus` 必须能区分：未初始化、legacy/配置错误、待 recovery、无表、系统 import 缺失/旧版/冲突、需重新生成、存在 pending-new、数据错误、就绪。
 
@@ -156,7 +160,7 @@ C1/C3/C4/generate/normalize/data prepare/configure/repair 的领域写入共享 
 | --- | --- |
 | `init [path] [--generated-csharp-dir <path>]` | 计划/初始化 Project v2 和四类目录 |
 | `project inspect` | 只读输出 ProjectInspection |
-| `project configure --generated-csharp-dir <path>` | 计划修改配置；不搬旧输出 |
+| `project configure [--schema-dir <path>] [--excel-dir <path>] [--generated-csharp-dir <path>] [--generated-bytes-dir <path>]` | 计划修改四类目录配置；不搬旧输出 |
 | `project repair-imports` | 计划修复 M1 系统 proto 镜像 |
 | `schema build [--check]` | 编译当前业务 proto；build 可生成 C#，check 只比较 |
 | `table create [name]` | 简单字段/选项 → initializer/target strategy → candidate proto 计划 |

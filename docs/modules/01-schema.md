@@ -354,15 +354,17 @@ EXE 内只有一个 canonical 系统 proto 来源。实现须公开以下只读�
 ```csharp
 public interface ISystemProtoCatalog
 {
-    string CatalogHash { get; }
     IReadOnlyList<SystemProtoFile> Files { get; }
-    bool TryGet(string logicalPath, out SystemProtoFile file);
+    string CatalogHash { get; }
+    bool TryGetFile(string logicalPath, out SystemProtoFile? file);
 }
 
-public sealed record SystemProtoFile(
-    string LogicalPath,
-    ReadOnlyMemory<byte> CanonicalBytes,
-    string Sha256);
+public sealed class SystemProtoFile
+{
+    public string LogicalPath { get; }
+    public ReadOnlyMemory<byte> CanonicalBytes { get; }
+    public string Sha256 { get; }
+}
 ```
 
 - catalog 至少覆盖 `exceldb/options.proto` 及该文件和业务 proto 可能传递导入的完整随包 `google/protobuf/*` 集。`LogicalPath` 使用 `/`、不得为绝对路径或包含 `.`/`..`;文件按 logical path ordinal 排序；`CatalogHash` 由完整 `(path,bytes)` 集确定性计算。
@@ -663,7 +665,7 @@ retired table 不产生任何 authoring/runtime 新类型、cell parser/writer�
 
 **有限 PoC 不再承担正式实现的衔接职责；工作区回到规范驱动状态,后续实现从 M1 的模块验收开始逐项建立。**
 
-落点:§8 仓库现状衔接；总纲 M1 实现状态回到 Not implemented。
+落点:§8 仓库现状衔接；该裁决执行当时，总纲 M1 实现状态回到 Not implemented，后续状态以总纲当前登记为准。
 
 ---
 

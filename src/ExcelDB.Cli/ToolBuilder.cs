@@ -1,4 +1,5 @@
 using ExcelDb.Schema.Authoring;
+using ExcelDb.Pipeline;
 using ExcelDb.Workbooks.Formatting;
 using ExcelDb.Workbooks.Importing;
 
@@ -59,4 +60,11 @@ public sealed class ToolBuilder
     }
 
     internal WorkbookValidatorRegistry CreateWorkbookValidatorRegistry() => new(WorkbookValidators);
+
+    internal IExcelDbProjectService CreateProjectService(string toolVersion) => new ExcelDbProjectService(
+        toolVersion,
+        TableInitializer,
+        ExportTargetStrategy,
+        CellFormats,
+        WorkbookValidators);
 }

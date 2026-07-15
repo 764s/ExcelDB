@@ -234,6 +234,27 @@ public readonly struct UnityEditorSettingsMetadata
     public string ToolVersion { get; }
 }
 
+/// <summary>The four Project v2 artifact locations shown by Unity settings.</summary>
+public readonly struct UnityEditorProjectSettings
+{
+    public UnityEditorProjectSettings(
+        string schemaDirectory,
+        string excelDirectory,
+        string generatedCSharpDirectory,
+        string generatedBytesDirectory)
+    {
+        SchemaDirectory = schemaDirectory;
+        ExcelDirectory = excelDirectory;
+        GeneratedCSharpDirectory = generatedCSharpDirectory;
+        GeneratedBytesDirectory = generatedBytesDirectory;
+    }
+
+    public string SchemaDirectory { get; }
+    public string ExcelDirectory { get; }
+    public string GeneratedCSharpDirectory { get; }
+    public string GeneratedBytesDirectory { get; }
+}
+
 /// <summary>
 /// Composition seam implemented by the trusted Unity host. Every method projects an existing
 /// ExcelDB operation; this package contains no editor-only schema, data, or persistence semantics.
@@ -247,9 +268,9 @@ public interface IExcelDbUnityEditorBridge
     IReadOnlyList<UnityEditorReportView> RecentReports { get; }
     IReadOnlyList<UnityEditorConflictView> Conflicts { get; }
     IReadOnlyList<UnityEditorPendingChangeView> PendingChanges { get; }
-    string[] ReadProjectSettings();
+    UnityEditorProjectSettings ReadProjectSettings();
     UnityEditorSettingsMetadata ReadProjectSettingsMetadata();
-    void WriteProjectSettings(string[] fiveValues);
+    void WriteProjectSettings(UnityEditorProjectSettings settings);
     void InitializeProject();
     void Refresh();
     void SaveAll();
@@ -268,7 +289,7 @@ public interface IExcelDbUnityEditorBridge
     IReadOnlyList<UnityEditorBrowserRow> SearchRowReferences(string filter, string refTable, string refGroup);
     void AssignRowReference(string ownerGuid, string propertyPath, string targetGuid);
     UnityEditorWorkbookSummary InspectWorkbook(string workbook);
-    UnityEditorPlanView BuildPlan(string operation, bool purge, bool rekey);
+    UnityEditorPlanView BuildPlan(string operation);
     void ApplyDisplayedPlan(string planHash);
     void ConvertClient();
     bool GuardDirty(string trigger);
