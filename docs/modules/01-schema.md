@@ -1,6 +1,6 @@
 # 模块 1:Schema 契约
 
-设计状态：**Dependency-Complete**；实现状态：**Pending verification**。本文是 M1 Schema 领域的唯一 owner；跨模块权威规则、状态和架构决策见 [`docs/spec/README.md`](../spec/README.md)。声明方式 = `.proto` + exceldb options；`.proto` 可由程序直接编辑，也可由结构化工具事务性维护，不要求手写；生成的 C# 类型是消费层投影，不是事实源。Project v2 新增的系统 proto 磁盘镜像只用于编辑器 import 解析，同样不是事实源。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M1 Schema 领域的唯一 owner；跨模块权威规则、状态和架构决策见 [`docs/spec/README.md`](../spec/README.md)。声明方式 = `.proto` + exceldb options；`.proto` 可由程序直接编辑，也可由结构化工具事务性维护，不要求手写；生成的 C# 类型是消费层投影，不是事实源。Project v2 新增的系统 proto 磁盘镜像只用于编辑器 import 解析，同样不是事实源。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
 
 ## 1. 声明方式与身份规则
 
@@ -474,7 +474,7 @@ retired table 不产生任何 authoring/runtime 新类型、cell parser/writer�
 
 - 旧实现(`ConfigDatabase`/`ExcelTableLoader`/SkillEditor 样例/旧测试/excels 样例数据)已于 2026-07-09 整体移除(D11);历史实现经 git 历史查阅,`UndoStack`/`DependencyGraph`/xlsx IO 需要时按件回捞参考。
 - 用于验证部分 schema 契约的旧 `poc/SchemaPoc` 已按用户要求于 2026-07-13 删除,不作为正式工程起点,也不从中迁移实现代码。
-- M1 既有纯 C# 实现已覆盖内嵌 schema 编译、canonical descriptor/hash、lint、codegen、初始化器与导出目标策略；Project v2 的完整 system proto catalog、编辑镜像排除、固定 C# 包装和所有权 manifest 尚待按 §7 第 23-24 条重验，故本模块实现状态保持 Pending verification。`options.proto` 保持相对 v1(git 历史)的兼容姿态:`TableOptions` 沿用 50001 号位,50011-50015 reserved,`ExternalRef` 由 reference family 取代；proto parser/descriptor 依赖仅存在于 Schema Tooling,不得进入 Core Runtime。
+- M1 纯 C# 实现已覆盖内嵌 schema 编译、canonical descriptor/hash、lint、codegen、初始化器与导出目标策略；Project v2 的完整 system proto catalog、编辑镜像排除、固定 C# 包装和所有权 manifest 已按 §7 第 23-24 条及发布单文件黑盒重验。`options.proto` 保持相对 v1(git 历史)的兼容姿态:`TableOptions` 沿用 50001 号位,50011-50015 reserved,`ExternalRef` 由 reference family 取代；proto parser/descriptor 依赖仅存在于 Schema Tooling,不得进入 Core Runtime。
 
 ## 9. 跨模块边界与架构决策
 

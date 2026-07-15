@@ -97,6 +97,7 @@ public sealed class ExcelDbProjectServiceTests : IDisposable
         Assert.Equal(Path.Combine(_root, "Generated", "Bytes"), inspection.GeneratedBytes.Path);
         Assert.Equal(Path.Combine(_root, ".exceldb"), inspection.InternalDirectory);
         Assert.Equal(ProjectStatus.NoTables, inspection.Status);
+        Assert.DoesNotContain(inspection.Diagnostics, static diagnostic => diagnostic.IsFailure);
     }
 
     [Fact]

@@ -207,25 +207,28 @@ public sealed class ExcelDbProjectService : IExcelDbProjectService
         }
 
         WorkbookCheckOutcome? check = null;
-        try
+        if (!sourceDiscoverySucceeded || sourceCount != 0)
         {
-            check = new WorkbookPipeline(_toolVersion, _schemas, _cellFormats, _validators)
-                .CheckAsync(pipelineProject, pendingIsBlocker: false)
-                .GetAwaiter()
-                .GetResult();
-            diagnostics.AddRange(check.Report.Diagnostics);
-        }
-        catch (Exception exception) when (exception is IOException
-                                           or UnauthorizedAccessException
-                                           or InvalidDataException
-                                           or ArgumentException
-                                           or NotSupportedException)
-        {
-            diagnostics.Add(new Diagnostic(
-                "project.inspect",
-                DiagnosticSeverity.Blocker,
-                context.RootDirectory,
-                exception.Message));
+            try
+            {
+                check = new WorkbookPipeline(_toolVersion, _schemas, _cellFormats, _validators)
+                    .CheckAsync(pipelineProject, pendingIsBlocker: false)
+                    .GetAwaiter()
+                    .GetResult();
+                diagnostics.AddRange(check.Report.Diagnostics);
+            }
+            catch (Exception exception) when (exception is IOException
+                                               or UnauthorizedAccessException
+                                               or InvalidDataException
+                                               or ArgumentException
+                                               or NotSupportedException)
+            {
+                diagnostics.Add(new Diagnostic(
+                    "project.inspect",
+                    DiagnosticSeverity.Blocker,
+                    context.RootDirectory,
+                    exception.Message));
+            }
         }
 
         var schema = check?.Schema?.Descriptor;

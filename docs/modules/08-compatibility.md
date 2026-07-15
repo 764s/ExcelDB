@@ -1,6 +1,6 @@
 # 模块 8:兼容与迁移
 
-设计状态：**Dependency-Complete**；实现状态：**Pending verification**。本文是 M8 兼容与迁移领域的唯一 owner；跨模块权威规则与架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文定义“schema 变化后如何保留数据并显式处理破坏操作”。身份与声明严格以 M1 为准:表 = `(exceldb.table).id`,字段 = proto field number,枚举值 = enum number,oneof variant = field number;`aliases`/`legacy` 是兼容输入,不是身份。Project v2 把必须版本化的发布历史固定在 `.exceldb/published`；隐藏位置不降低其兼容证据地位。归档 C# 特性方案及 `FormerName` 无规范效力。后续引用本文记作 M8§x。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M8 兼容与迁移领域的唯一 owner；跨模块权威规则与架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文定义“schema 变化后如何保留数据并显式处理破坏操作”。身份与声明严格以 M1 为准:表 = `(exceldb.table).id`,字段 = proto field number,枚举值 = enum number,oneof variant = field number;`aliases`/`legacy` 是兼容输入,不是身份。Project v2 把必须版本化的发布历史固定在 `.exceldb/published`；隐藏位置不降低其兼容证据地位。归档 C# 特性方案及 `FormerName` 无规范效力。后续引用本文记作 M8§x。
 
 ## 1. 范围与总则
 

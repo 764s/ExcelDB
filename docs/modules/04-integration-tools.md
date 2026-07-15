@@ -1,6 +1,6 @@
 # 模块 4：集成工具（Project Hub / CLI / Unity / CI / VCS）
 
-设计状态：**Dependency-Complete**；实现状态：**Pending verification**。本文是 M4 集成工具投影的唯一 owner；工具只投影 M2/M3/M5-M8 已定义的领域操作，不发明第二套 schema、workbook、convert 或 runtime 语义。跨模块权威规则与架构决策见 [`docs/spec/README.md`](../spec/README.md)。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M4 集成工具投影的唯一 owner；工具只投影 M2/M3/M5-M8 已定义的领域操作，不发明第二套 schema、workbook、convert 或 runtime 语义。跨模块权威规则与架构决策见 [`docs/spec/README.md`](../spec/README.md)。
 
 ## 1. 产品入口与覆盖原则
 
@@ -277,7 +277,7 @@ I6  按 target 隔离上传 Generated/Bytes/<target>/config.bytes + manifest
 
 ## 11. 与仓库现状衔接
 
-- 既有纯 C# CLI、Editor 服务、Unity UPM 与 samples 提供了部分操作投影；Project Hub、Project v2、system import 编辑镜像、target 派生输出和多根恢复事务尚待实现并重验，故本模块状态为 Pending verification。
+- 纯 C# CLI、Editor 服务、Unity UPM、Project Hub、Project v2、system import 编辑镜像、target 派生输出、多根恢复事务与 samples 已完成同源投影，并通过整套测试与发布单文件端到端重验。
 - 权威契约只来自本文与 owner 模块；README、usage、samples 和 Release workflow 必须在实现验收后投影本文，不得补充第二套行为。
 
 ## 12. 跨模块边界

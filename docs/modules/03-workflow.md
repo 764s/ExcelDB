@@ -1,6 +1,6 @@
 # 模块 3:工作流(端到端编排)
 
-设计状态：**Dependency-Complete**；实现状态：**Pending verification**。本文是 M3 角色、工件和端到端编排的唯一 owner，只回答“谁、何时、经哪个入口、失败后去哪”，不重定义 M1/M2/M5-M8 的领域机制。跨模块权威规则和架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
+设计状态：**Dependency-Complete**；实现状态：**Verified**。本文是 M3 角色、工件和端到端编排的唯一 owner，只回答“谁、何时、经哪个入口、失败后去哪”，不重定义 M1/M2/M5-M8 的领域机制。跨模块权威规则和架构决策见 [`docs/spec/README.md`](../spec/README.md)。本文仍出现的 `P§x` 只按总纲 §7 的迁移表解析，不指向归档计划；文末决策记录仅解释背景，不增加契约。
 
 ## 1. 范围、角色与工件
 
@@ -198,7 +198,7 @@ exceldb diff [--schema-dir <dir>] <base.xlsx> <target.xlsx> [--json <path>]
 
 ## 12. 与仓库现状衔接
 
-- 既有 Pipeline、CLI、OperationReport 已覆盖初始化、schema、workbook、身份准备、检查、转换、diff 与失败恢复；Project Hub、四类工件、系统 proto 修复和多根事务仍待实现与重验，因此本模块保持 Pending verification。
+- Pipeline、CLI、OperationReport、Project Hub、四类工件、系统 proto 修复和多根事务已形成同一工作流实现，并通过整套测试与发布单文件端到端重验。
 - 权威迁移后,工作流与门禁语义由本文拥有;CLI/UI/CI/VCS 的具体投影只由 M4 拥有,归档计划与实施文档均不得补充第二种流程。
 - M4 必须以 self-contained 单文件交付 Project Hub 与等价 CLI，并复用本文同一工作流与门禁；旧三阶段 G1 不再是现行交互契约。
 - M1 已同步“向导可事务性维护 proto”入口与导出目标策略边界,且 proto 的结构事实源地位不变;策略展开的 effective targets 必须显式落 proto,Excel 与生成 C# 仍只是数据事实源/结构投影,不得反向定义 schema。

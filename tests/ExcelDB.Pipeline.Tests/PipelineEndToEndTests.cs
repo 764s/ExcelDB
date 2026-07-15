@@ -836,6 +836,47 @@ public sealed class PipelineEndToEndTests : IDisposable
     }
 
     [Theory]
+    [InlineData("missing")]
+    [InlineData("tampered")]
+    public async Task Every_published_descriptor_is_validated_not_only_the_latest(string failure)
+    {
+        var (_, compatibility) = await PrepareInitiallyPublishedEvolutionAsync();
+        var secondPublish = await compatibility.CreatePublishPlanAsync(Load());
+        Assert.False(
+            secondPublish.HasBlockers,
+            string.Join(Environment.NewLine, secondPublish.Diagnostics.Select(static item => item.Message)));
+        Assert.Equal(0, (int)new MutationPlanApplier().Apply(secondPublish).ExitCode);
+
+        var project = Load();
+        var indexPath = PublishedSchemaHistoryStore.IndexPath(project);
+        using var index = JsonDocument.Parse(File.ReadAllBytes(indexPath));
+        var entries = index.RootElement.GetProperty("entries").EnumerateArray().ToArray();
+        Assert.Equal(2, entries.Length);
+        var earlierDescriptor = Path.Combine(
+            PublishedSchemaHistoryStore.DirectoryPath(project),
+            entries[0].GetProperty("descriptorFile").GetString()!);
+        var latestDescriptor = Path.Combine(
+            PublishedSchemaHistoryStore.DirectoryPath(project),
+            entries[^1].GetProperty("descriptorFile").GetString()!);
+        Assert.NotEqual(earlierDescriptor, latestDescriptor);
+        Assert.True(File.Exists(latestDescriptor));
+
+        if (failure == "missing")
+            File.Delete(earlierDescriptor);
+        else
+            File.AppendAllText(earlierDescriptor, "tampered", new UTF8Encoding(false));
+
+        var history = PublishedSchemaHistoryStore.LoadLatest(project);
+        Assert.False(history.IsValid);
+        Assert.Contains(history.Diagnostics, static diagnostic => diagnostic.Code == "compat.history-invalid");
+        var rejected = await compatibility.CreatePublishPlanAsync(project);
+        Assert.True(rejected.HasBlockers);
+        Assert.DoesNotContain(
+            rejected.Mutations,
+            mutation => NormalizePath(mutation.RelativePath).StartsWith(".exceldb/published/", StringComparison.Ordinal));
+    }
+
+    [Theory]
     [InlineData("generated-csharp")]
     [InlineData("codegen-manifest")]
     [InlineData("bytes")]
