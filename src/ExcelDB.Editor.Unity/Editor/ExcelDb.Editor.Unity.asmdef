@@ -7,7 +7,14 @@
   ],
   "excludePlatforms": [],
   "allowUnsafeCode": false,
-  "overrideReferences": false,
+  "overrideReferences": true,
+  "precompiledReferences": [
+    "ExcelDB.Authoring.dll",
+    "ExcelDB.Authoring.Workbooks.dll",
+    "ExcelDB.Editor.Model.dll",
+    "ExcelDB.Schema.Model.dll",
+    "ExcelDB.Workbooks.dll"
+  ],
   "autoReferenced": true,
   "defineConstraints": [],
   "versionDefines": [],

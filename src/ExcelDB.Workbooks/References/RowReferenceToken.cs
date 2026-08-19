@@ -21,7 +21,7 @@ public readonly record struct RowReferenceToken(int TableId, ImmutableArray<stri
     {
         if (tableId <= 0)
             throw new ArgumentOutOfRangeException(nameof(tableId), "A RowRef table id must be positive.");
-        ArgumentNullException.ThrowIfNull(keyComponents);
+        Guard.NotNull(keyComponents);
         var components = keyComponents.ToImmutableArray();
         if (components.IsDefaultOrEmpty)
             throw new ArgumentException("A RowRef token must contain at least one key component.", nameof(keyComponents));
@@ -197,10 +197,10 @@ public static class CanonicalKeyCodec
 {
     public static string Format(IEnumerable<string> components)
     {
-        ArgumentNullException.ThrowIfNull(components);
+        Guard.NotNull(components);
         return string.Join('|', components.Select(static component =>
         {
-            ArgumentNullException.ThrowIfNull(component);
+            Guard.NotNull(component);
             return $"{component.Length.ToString(CultureInfo.InvariantCulture)}:{component}";
         }));
     }
@@ -264,9 +264,9 @@ public static class RowReferenceResolver
         CanonicalSchemaDescriptor schema,
         IEnumerable<ImportedRow> rows)
     {
-        ArgumentNullException.ThrowIfNull(field);
-        ArgumentNullException.ThrowIfNull(schema);
-        ArgumentNullException.ThrowIfNull(rows);
+        Guard.NotNull(field);
+        Guard.NotNull(schema);
+        Guard.NotNull(rows);
         if (!RowReferenceToken.TryParse(tokenText, out var token, out var parseError))
             return Failure(parseError!);
 

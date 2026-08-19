@@ -54,8 +54,8 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
         WorkbookValidatorRegistry? validators = null)
     {
         _schema = schema ?? throw new ArgumentNullException(nameof(schema));
-        ArgumentNullException.ThrowIfNull(runtimeRegistry);
-        ArgumentNullException.ThrowIfNull(codecs);
+        Guard.NotNull(runtimeRegistry);
+        Guard.NotNull(codecs);
         if (runtimeRegistry.ExpectedSchemaHash != schema.SchemaHash)
         {
             throw new ArgumentException(
@@ -167,7 +167,7 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
 
     public OperationReport Save(AuthoringSaveRequest request)
     {
-        ArgumentNullException.ThrowIfNull(request);
+        Guard.NotNull(request);
         return Save([request]);
     }
 
@@ -210,7 +210,9 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
                 var preparationArray = preparations.ToImmutable();
                 var combinedPlanHash = string.Join(
                     "+",
-                    preparationArray.Select(static item => item.WritePlan.PlanHash).Order(StringComparer.Ordinal));
+                preparationArray
+                    .Select(static item => item.WritePlan.PlanHash)
+                    .OrderBy(static planHash => planHash, StringComparer.Ordinal));
                 var transaction = MultiWorkbookTransaction.Commit(
                     preparationArray.Select(static item => item.PreparedWrite));
                 if (!transaction.Report.Succeeded)
@@ -546,7 +548,7 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
                 .Where(static table => !table.IsRetiredPreserved)
                 .Select(static table => table.ProtoName)
                 .Distinct(StringComparer.Ordinal)
-                .Order(StringComparer.Ordinal)
+                .OrderBy(static key => key, StringComparer.Ordinal)
                 .ToImmutableArray());
         if (!report.Succeeded)
             return new BuildStateResult(authoringImport, null);
@@ -831,8 +833,8 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
         CanonicalSchemaDescriptor schema,
         RuntimeSchemaRegistry runtimeRegistry)
     {
-        ArgumentNullException.ThrowIfNull(schema);
-        ArgumentNullException.ThrowIfNull(runtimeRegistry);
+        Guard.NotNull(schema);
+        Guard.NotNull(runtimeRegistry);
         var bindings = runtimeRegistry.Bindings.ToDictionary(static binding => binding.TableId);
         foreach (var table in schema.Tables.Where(static table => table.Kind == CanonicalTableKind.Asset))
         {
@@ -881,7 +883,7 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
 
     private static string NormalizePath(string path)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        Guard.NotNullOrWhiteSpace(path);
         return Path.GetFullPath(path);
     }
 
@@ -929,7 +931,7 @@ internal sealed class RuntimeDependencyImpactClosureProvider : IImpactClosurePro
 
     public RuntimeDependencyImpactClosureProvider(IEnumerable<RuntimeAssetRecord> records)
     {
-        ArgumentNullException.ThrowIfNull(records);
+        Guard.NotNull(records);
         var graph = new Dictionary<AssetIdentity, HashSet<AssetIdentity>>();
         foreach (var record in records)
         {
@@ -951,8 +953,8 @@ internal sealed class RuntimeDependencyImpactClosureProvider : IImpactClosurePro
         IEnumerable<AssetIdentity> seeds,
         ImportSnapshot snapshot)
     {
-        ArgumentNullException.ThrowIfNull(seeds);
-        ArgumentNullException.ThrowIfNull(snapshot);
+        Guard.NotNull(seeds);
+        Guard.NotNull(snapshot);
         var result = seeds.ToHashSet();
         var queue = new Queue<AssetIdentity>(result);
         while (queue.TryDequeue(out var identity))

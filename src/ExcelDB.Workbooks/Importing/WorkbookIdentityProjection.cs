@@ -16,8 +16,8 @@ public static class WorkbookIdentityProjection
         WorkbookImportResult import,
         CanonicalSchemaDescriptor? schema = null)
     {
-        ArgumentNullException.ThrowIfNull(workbook);
-        ArgumentNullException.ThrowIfNull(import);
+        Guard.NotNull(workbook);
+        Guard.NotNull(import);
         var keys = import.Rows.ToDictionary(
             static row => (row.TableId, row.RowNumber),
             static row => row.Key);

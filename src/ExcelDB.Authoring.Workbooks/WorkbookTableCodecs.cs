@@ -49,7 +49,7 @@ public sealed class DelegateAuthoringWorkbookTableCodec<T> : IAuthoringWorkbookT
     {
         if (tableId <= 0)
             throw new ArgumentOutOfRangeException(nameof(tableId));
-        ArgumentException.ThrowIfNullOrWhiteSpace(tableName);
+        Guard.NotNullOrWhiteSpace(tableName);
         TableId = tableId;
         TableName = tableName;
         _createRuntimeRecord = createRuntimeRecord ?? throw new ArgumentNullException(nameof(createRuntimeRecord));
@@ -97,7 +97,7 @@ public static class CanonicalRuntimeFieldEncoding
 
     public static CanonicalValue Decode(ReadOnlySpan<byte> payload)
     {
-        if (payload.IsEmpty || !Enum.IsDefined((CanonicalValueState)payload[0]))
+        if (payload.IsEmpty || !Enum.IsDefined(typeof(CanonicalValueState), (CanonicalValueState)payload[0]))
             throw new InvalidDataException("Runtime canonical field payload has an invalid state.");
         var state = (CanonicalValueState)payload[0];
         var text = payload.Length == 1 ? string.Empty : StrictUtf8.GetString(payload[1..]);
@@ -146,7 +146,7 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
 
     public RuntimeAssetRecord CreateRuntimeRecord(ImportedRow row)
     {
-        ArgumentNullException.ThrowIfNull(row);
+        Guard.NotNull(row);
         var identity = row.Identity
             ?? throw new ArgumentException("An indexable runtime row requires an identity.", nameof(row));
         var key = row.Key
@@ -165,7 +165,7 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
 
     public SnapshotRow Capture(AuthoringSaveItem item, SnapshotRow? baseline)
     {
-        ArgumentNullException.ThrowIfNull(item);
+        Guard.NotNull(item);
         if (item.TableId != TableId || !string.Equals(item.TableName, TableName, StringComparison.Ordinal))
             throw new ArgumentException("Save item does not belong to this table codec.", nameof(item));
         if (item.Asset is not T asset)

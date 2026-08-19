@@ -92,11 +92,16 @@ public sealed class AuthoringTableRegistration
     {
         if (tableId <= 0)
             throw new ArgumentOutOfRangeException(nameof(tableId));
-        ArgumentException.ThrowIfNullOrWhiteSpace(tableName);
-        ArgumentNullException.ThrowIfNull(assetType);
-        ArgumentNullException.ThrowIfNull(getKey);
-        ArgumentNullException.ThrowIfNull(setKey);
-        ArgumentNullException.ThrowIfNull(clone);
+        if (string.IsNullOrWhiteSpace(tableName))
+            throw new ArgumentException("Value cannot be null or whitespace.", nameof(tableName));
+        if (assetType is null)
+            throw new ArgumentNullException(nameof(assetType));
+        if (getKey is null)
+            throw new ArgumentNullException(nameof(getKey));
+        if (setKey is null)
+            throw new ArgumentNullException(nameof(setKey));
+        if (clone is null)
+            throw new ArgumentNullException(nameof(clone));
         TableId = tableId;
         TableName = tableName;
         AssetType = assetType;
@@ -113,7 +118,7 @@ public sealed class AuthoringTableRegistration
             .Append(tableName)
             .Append(assetType.Name)
             .Distinct(StringComparer.Ordinal)
-            .Order(StringComparer.Ordinal)
+            .OrderBy(static alias => alias, StringComparer.Ordinal)
             .ToImmutableArray();
     }
 
@@ -122,6 +127,12 @@ public sealed class AuthoringTableRegistration
     public Type AssetType { get; }
     public Func<object, string> GetKey { get; }
     public Action<object, string> SetKey { get; }
+    /// <summary>
+    /// Canonical snapshot/copy primitive for this table. The delegate must return a new instance
+    /// of <see cref="AssetType"/> whose mutable reference graph is independent from the source;
+    /// immutable values may be shared. ExcelDB uses this same deep-clone contract for copied rows,
+    /// persisted discard baselines, and post-save baselines.
+    /// </summary>
     public Func<object, object> Clone { get; }
     public Func<object, IEnumerable<GUID>>? GetDependencies { get; }
     public Func<object, IEnumerable<string>>? GetLabels { get; }
@@ -129,6 +140,33 @@ public sealed class AuthoringTableRegistration
     public Func<object, IEnumerable<AuthoringReference>>? GetReferences { get; }
     public ImmutableArray<string> TypeAliases { get; }
     public Action<object, object> ApplyImported { get; }
+
+    internal object CloneAsset(object source)
+    {
+        if (source is null)
+            throw new ArgumentNullException(nameof(source));
+        if (!AssetType.IsInstanceOfType(source))
+        {
+            throw new InvalidOperationException(
+                $"The clone source for table '{TableName}' must be assignable to {AssetType.FullName}.");
+        }
+
+        var clone = Clone(source)
+            ?? throw new InvalidOperationException($"The clone delegate for table '{TableName}' returned null.");
+        if (!AssetType.IsInstanceOfType(clone))
+        {
+            throw new InvalidOperationException(
+                $"The clone delegate for table '{TableName}' returned {clone.GetType().FullName}, expected {AssetType.FullName}.");
+        }
+
+        if (ReferenceEquals(source, clone))
+        {
+            throw new InvalidOperationException(
+                $"The clone delegate for table '{TableName}' returned the source instance; persisted baselines require an independent deep clone.");
+        }
+
+        return clone;
+    }
 
     private static void CopyPublicMembers(object destination, object source)
     {

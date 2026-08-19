@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;netstandard2.1</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
@@ -14,8 +14,12 @@
   <ItemGroup>
     <ProjectReference Include="..\ExcelDB.Authoring\ExcelDB.Authoring.csproj" />
     <ProjectReference Include="..\ExcelDB.Workbooks\ExcelDB.Workbooks.csproj" />
-    <ProjectReference Include="..\ExcelDB.Schema\ExcelDB.Schema.csproj" />
+    <ProjectReference Include="..\ExcelDB.Schema.Model\ExcelDB.Schema.Model.csproj" />
     <ProjectReference Include="..\ExcelDB.Runtime\ExcelDB.Runtime.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
+    <PackageReference Include="System.Collections.Immutable" Version="8.0.0" />
   </ItemGroup>
 
 </Project>

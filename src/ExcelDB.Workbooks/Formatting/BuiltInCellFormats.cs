@@ -12,7 +12,7 @@ public sealed class JoinCellFormat : ICellFormat
 
     public JoinCellFormat(IEnumerable<string> separators)
     {
-        ArgumentNullException.ThrowIfNull(separators);
+        Guard.NotNull(separators);
         this.separators = separators.ToImmutableArray();
         if (this.separators.IsDefaultOrEmpty || this.separators.Any(string.IsNullOrEmpty))
             throw new ArgumentException("join requires one or two non-empty separators.", nameof(separators));
@@ -31,8 +31,8 @@ public sealed class JoinCellFormat : ICellFormat
         out string canonicalValue,
         out string? error)
     {
-        ArgumentNullException.ThrowIfNull(physicalText);
-        ArgumentNullException.ThrowIfNull(context);
+        Guard.NotNull(physicalText);
+        Guard.NotNull(context);
         JsonNode? value;
         var succeeded = context.Field.Shape switch
         {
@@ -56,8 +56,8 @@ public sealed class JoinCellFormat : ICellFormat
         out string physicalText,
         out string? error)
     {
-        ArgumentNullException.ThrowIfNull(canonicalValue);
-        ArgumentNullException.ThrowIfNull(context);
+        Guard.NotNull(canonicalValue);
+        Guard.NotNull(context);
         if (!TryReadCanonicalJson(canonicalValue, out var value, out error))
         {
             physicalText = string.Empty;
@@ -554,7 +554,7 @@ public sealed class JoinCellFormat : ICellFormat
     }
 
     private static string EscapeIdentityPart(string value) =>
-        Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(value));
+        HashUtility.ToUpperHex(System.Text.Encoding.UTF8.GetBytes(value));
 }
 
 /// <summary>Named key/value format for single-cell messages and scalar maps.</summary>
@@ -566,16 +566,16 @@ public sealed class NamedCellFormat : ICellFormat
 
     public NamedCellFormat(string pairSeparator, string keyValueSeparator)
     {
-        ArgumentException.ThrowIfNullOrEmpty(pairSeparator);
-        ArgumentException.ThrowIfNullOrEmpty(keyValueSeparator);
+        Guard.NotNullOrEmpty(pairSeparator);
+        Guard.NotNullOrEmpty(keyValueSeparator);
         this.pairSeparator = pairSeparator;
         this.keyValueSeparator = keyValueSeparator;
         separators = [pairSeparator, keyValueSeparator];
     }
 
     public string Identity =>
-        $"named:{Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(pairSeparator))}:" +
-        Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(keyValueSeparator));
+        $"named:{HashUtility.ToUpperHex(System.Text.Encoding.UTF8.GetBytes(pairSeparator))}:" +
+        HashUtility.ToUpperHex(System.Text.Encoding.UTF8.GetBytes(keyValueSeparator));
 
     public string Describe(CellFormatContext context) =>
         $"named pairs ('{pairSeparator}' between pairs, '{keyValueSeparator}' between key and value)";
@@ -586,8 +586,8 @@ public sealed class NamedCellFormat : ICellFormat
         out string canonicalValue,
         out string? error)
     {
-        ArgumentNullException.ThrowIfNull(physicalText);
-        ArgumentNullException.ThrowIfNull(context);
+        Guard.NotNull(physicalText);
+        Guard.NotNull(context);
         JsonObject? value;
         var succeeded = context.Field.Shape switch
         {
@@ -605,8 +605,8 @@ public sealed class NamedCellFormat : ICellFormat
         out string physicalText,
         out string? error)
     {
-        ArgumentNullException.ThrowIfNull(canonicalValue);
-        ArgumentNullException.ThrowIfNull(context);
+        Guard.NotNull(canonicalValue);
+        Guard.NotNull(context);
         JsonNode? node;
         try
         {

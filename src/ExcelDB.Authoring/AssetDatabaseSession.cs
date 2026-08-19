@@ -17,7 +17,7 @@ public class AssetDatabaseSession : IDisposable
     private readonly Dictionary<int, AuthoringTableRegistration> _tablesById = [];
     private readonly Dictionary<string, AuthoringTableRegistration> _tablesByName = new(StringComparer.Ordinal);
     private readonly Dictionary<GUID, AssetEntry> _byGuid = [];
-    private readonly Dictionary<object, AssetEntry> _byObject = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<object, AssetEntry> _byObject = new(ObjectReferenceEqualityComparer.Instance);
     private readonly Dictionary<string, AssetEntry> _byPath = new(StringComparer.Ordinal);
     private readonly Dictionary<(int TableId, string Key), AssetEntry> _byTableKey = [];
     private readonly List<ConflictRecord> _conflicts = [];
@@ -41,7 +41,7 @@ public class AssetDatabaseSession : IDisposable
         bool enableWatcher = false)
     {
         _adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
-        if (!Enum.IsDefined(mode))
+        if (!Enum.IsDefined(typeof(RuntimeMode), mode))
             throw new ArgumentOutOfRangeException(nameof(mode));
         _mode = mode;
         _excelEnabled = mode == RuntimeMode.EditorAuthoring
@@ -63,7 +63,8 @@ public class AssetDatabaseSession : IDisposable
     public AssetDatabaseSession RegisterTable(AuthoringTableRegistration registration)
     {
         ThrowIfDisposed();
-        ArgumentNullException.ThrowIfNull(registration);
+        if (registration is null)
+            throw new ArgumentNullException(nameof(registration));
         if (!_tablesById.TryAdd(registration.TableId, registration)
             || !_tablesByName.TryAdd(registration.TableName, registration))
         {
@@ -143,7 +144,7 @@ public class AssetDatabaseSession : IDisposable
         ThrowIfDisposed();
         EnsureExcelAllowed();
         EnsureNotPublishing();
-        foreach (var path in _workbooks.Keys.Order(StringComparer.Ordinal).ToArray())
+        foreach (var path in _workbooks.Keys.OrderBy(static path => path, StringComparer.Ordinal).ToArray())
         {
             if (_editingDepth != 0)
                 QueueImport(path, options);
@@ -207,7 +208,12 @@ public class AssetDatabaseSession : IDisposable
 
         if (workbook.Entries.Any(static entry => entry.Dirty || entry.Deleted))
         {
-            AddDiagnostic("EXAD0004", DiagnosticSeverity.Error, path, "Import would overwrite unsaved authoring changes.");
+            QueueImport(path, options);
+            AddDiagnostic(
+                "EXAD0004",
+                DiagnosticSeverity.Error,
+                path,
+                "Import is deferred until unsaved authoring changes are saved or discarded.");
             return;
         }
 
@@ -224,7 +230,7 @@ public class AssetDatabaseSession : IDisposable
         var candidateGuids = new HashSet<GUID>();
         var candidatePaths = new HashSet<string>(StringComparer.Ordinal);
         var candidateKeys = new HashSet<(int TableId, string Key)>();
-        var candidateObjects = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        var candidateObjects = new HashSet<object>(ObjectReferenceEqualityComparer.Instance);
         var importDiagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
         foreach (var imported in result.Assets)
         {
@@ -278,6 +284,8 @@ public class AssetDatabaseSession : IDisposable
 
         foreach (var candidate in candidates.Where(static candidate => candidate.Reused))
             candidate.Entry.Table.ApplyImported(candidate.Entry.Asset, candidate.ImportedAsset);
+        foreach (var candidate in candidates)
+            candidate.Entry.PersistedAsset = candidate.Entry.Table.CloneAsset(candidate.Entry.Asset);
         foreach (var entry in previousEntries)
             RemoveIndexes(entry);
         workbook.Entries.Clear();
@@ -299,7 +307,8 @@ public class AssetDatabaseSession : IDisposable
 
     internal object? Load(string path, Type type)
     {
-        ArgumentNullException.ThrowIfNull(type);
+        if (type is null)
+            throw new ArgumentNullException(nameof(type));
         path = NormalizePath(path);
         return _byPath.TryGetValue(path, out var entry) && !entry.Deleted && type.IsInstanceOfType(entry.Asset)
             ? entry.Asset
@@ -329,7 +338,11 @@ public class AssetDatabaseSession : IDisposable
     internal string[] Find(string filter, string[]? folders)
     {
         filter ??= string.Empty;
-        var tokens = filter.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var tokens = filter
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .Select(static token => token.Trim())
+            .Where(static token => token.Length != 0)
+            .ToArray();
         var nameTerms = tokens.Where(static token => !token.Contains(':')).ToArray();
         var typeTerms = Values(tokens, "t:");
         var labelTerms = Values(tokens, "l:");
@@ -375,7 +388,8 @@ public class AssetDatabaseSession : IDisposable
 
     internal void Create(object asset, string path)
     {
-        ArgumentNullException.ThrowIfNull(asset);
+        if (asset is null)
+            throw new ArgumentNullException(nameof(asset));
         EnsureWriteAllowed();
         path = NormalizePath(path);
         if (_byPath.ContainsKey(path))
@@ -457,7 +471,7 @@ public class AssetDatabaseSession : IDisposable
                 "EXAD0104",
                 DiagnosticSeverity.Error,
                 path,
-                $"Asset deletion is blocked by: {string.Join(", ", blockers.Select(static edge => $"{edge.Owner.Path}:{edge.Reference.PropertyPath}").Order(StringComparer.Ordinal))}.");
+                $"Asset deletion is blocked by: {string.Join(", ", blockers.Select(static edge => $"{edge.Owner.Path}:{edge.Reference.PropertyPath}").OrderBy(static value => value, StringComparer.Ordinal))}.");
             return false;
         }
 
@@ -470,7 +484,7 @@ public class AssetDatabaseSession : IDisposable
                 "EXAD0106",
                 DiagnosticSeverity.Blocker,
                 path,
-                $"SET_NULL references have no clear accessor: {string.Join(", ", invalidSetNull.Select(static edge => $"{edge.Owner.Path}:{edge.Reference.PropertyPath}").Order(StringComparer.Ordinal))}.");
+                $"SET_NULL references have no clear accessor: {string.Join(", ", invalidSetNull.Select(static edge => $"{edge.Owner.Path}:{edge.Reference.PropertyPath}").OrderBy(static value => value, StringComparer.Ordinal))}.");
             return false;
         }
 
@@ -564,7 +578,7 @@ public class AssetDatabaseSession : IDisposable
             AddDiagnostic("EXAD0109", DiagnosticSeverity.Error, newPath, "Copy source is missing or the destination already exists.");
             return false;
         }
-        var clone = source.Table.Clone(source.Asset);
+        var clone = source.Table.CloneAsset(source.Asset);
         Create(clone, newPath);
         return _byObject.ContainsKey(clone);
     }
@@ -639,7 +653,8 @@ public class AssetDatabaseSession : IDisposable
         EnsureWriteAllowed();
         if (obj is not null && _byObject.TryGetValue(obj, out var entry))
         {
-            entry.Dirty = true;
+            if (!entry.Dirty && !entry.Deleted)
+                return;
             if (_editingDepth != 0)
                 _pendingSingleSaves.Add(entry);
             else
@@ -656,7 +671,8 @@ public class AssetDatabaseSession : IDisposable
         EnsureWriteAllowed();
         if (_byGuid.TryGetValue(guid, out var entry))
         {
-            entry.Dirty = true;
+            if (!entry.Dirty && !entry.Deleted)
+                return;
             if (_editingDepth != 0)
                 _pendingSingleSaves.Add(entry);
             else
@@ -666,6 +682,139 @@ public class AssetDatabaseSession : IDisposable
         {
             AddDiagnostic("EXAD0201", DiagnosticSeverity.Error, guid.ToString(), "GUID is not a persisted ExcelDB asset.");
         }
+    }
+
+    internal void MarkDirty(object obj)
+    {
+        EnsureWriteAllowed();
+        if (obj is not null && _byObject.TryGetValue(obj, out var entry) && !entry.Deleted)
+        {
+            entry.Dirty = true;
+            PublishEditingIfReady();
+            return;
+        }
+
+        AddDiagnostic("EXAD0210", DiagnosticSeverity.Error, ".", "Object is not a live ExcelDB asset.");
+    }
+
+    internal bool IsAssetDirty(object obj) =>
+        obj is not null
+        && _byObject.TryGetValue(obj, out var entry)
+        && (entry.Dirty || entry.Deleted);
+
+    internal bool IsAssetDirty(GUID guid) =>
+        !guid.Empty()
+        && _byGuid.TryGetValue(guid, out var entry)
+        && (entry.Dirty || entry.Deleted);
+
+    /// <summary>
+    /// Returns an opaque token for the resident value published by this authoring session.
+    /// The token changes after import, save, or discard publishes a new editor baseline even
+    /// when an externally edited workbook did not advance its persisted __rev column.
+    /// </summary>
+    internal string GetAssetRevisionToken(object obj)
+    {
+        if (obj is null || !_byObject.TryGetValue(obj, out var entry) || entry.Deleted)
+            throw new ArgumentException("Object is not a live ExcelDB asset.", nameof(obj));
+        return entry.EditorRevision.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    internal bool DiscardChanges(object obj)
+    {
+        EnsureWriteAllowed();
+        if (obj is null || !_byObject.TryGetValue(obj, out var entry))
+        {
+            AddDiagnostic("EXAD0211", DiagnosticSeverity.Error, ".", "Object is not an ExcelDB asset in this authoring session.");
+            return false;
+        }
+
+        return DiscardChanges(entry);
+    }
+
+    internal bool DiscardChanges(GUID guid)
+    {
+        EnsureWriteAllowed();
+        if (guid.Empty() || !_byGuid.TryGetValue(guid, out var entry))
+        {
+            AddDiagnostic("EXAD0212", DiagnosticSeverity.Error, guid.ToString(), "GUID is not an ExcelDB asset in this authoring session.");
+            return false;
+        }
+
+        return DiscardChanges(entry);
+    }
+
+    private bool DiscardChanges(AssetEntry root)
+    {
+        var affected = ExpandImpactClosure(root)
+            .Where(static entry => entry.Dirty || entry.Deleted)
+            .OrderBy(static entry => entry.Order)
+            .ToArray();
+        if (affected.Length == 0)
+            return true;
+
+        var affectedSet = affected.ToHashSet();
+        var desiredPaths = new HashSet<string>(StringComparer.Ordinal);
+        var desiredKeys = new HashSet<(int TableId, string Key)>();
+        foreach (var entry in affected.Where(static entry => entry.PersistedWorkbook is not null))
+        {
+            var path = $"{entry.PersistedWorkbook!.Path}/{entry.Table.TableName}/{entry.PersistedKey}";
+            var key = (entry.Table.TableId, entry.PersistedKey!);
+            if (!desiredPaths.Add(path)
+                || !desiredKeys.Add(key)
+                || (_byPath.TryGetValue(path, out var pathOwner) && !affectedSet.Contains(pathOwner))
+                || (_byTableKey.TryGetValue(key, out var keyOwner) && !affectedSet.Contains(keyOwner)))
+            {
+                AddDiagnostic("EXAD0213", DiagnosticSeverity.Error, path, "Discard would collide with another live asset path or table key.");
+                return false;
+            }
+        }
+
+        foreach (var entry in affected)
+        {
+            _byPath.Remove(entry.Path);
+            _byTableKey.Remove((entry.Table.TableId, entry.Key));
+        }
+
+        foreach (var entry in affected)
+        {
+            _pendingSingleSaves.Remove(entry);
+            if (entry.PersistedWorkbook is null)
+            {
+                entry.Workbook.Entries.Remove(entry);
+                _byGuid.Remove(entry.Guid);
+                _byObject.Remove(entry.Asset);
+                entry.Dirty = false;
+                continue;
+            }
+
+            if (!ReferenceEquals(entry.Workbook, entry.PersistedWorkbook))
+            {
+                entry.Workbook.Entries.Remove(entry);
+                entry.PersistedWorkbook.Entries.Add(entry);
+                entry.Workbook = entry.PersistedWorkbook;
+            }
+
+            entry.Key = entry.PersistedKey!;
+            var baseline = entry.Table.CloneAsset(entry.PersistedAsset!);
+            entry.Table.ApplyImported(entry.Asset, baseline);
+            entry.Table.SetKey(entry.Asset, entry.Key);
+            entry.Deleted = false;
+            entry.Dirty = false;
+            entry.AdvanceEditorRevision();
+            _byPath.Add(entry.Path, entry);
+            _byTableKey.Add((entry.Table.TableId, entry.Key), entry);
+        }
+
+        foreach (var entry in affected)
+        {
+            foreach (var neighbor in entry.ImpactClosure.ToArray())
+                neighbor.ImpactClosure.Remove(entry);
+            entry.ImpactClosure.Clear();
+        }
+
+        PublishEditingIfReady();
+        DrainPendingImports();
+        return true;
     }
 
     internal string[] Dependencies(string path, bool recursive)
@@ -699,14 +848,19 @@ public class AssetDatabaseSession : IDisposable
     internal void SetLabels(object obj, string[] labels)
     {
         EnsureWriteAllowed();
-        ArgumentNullException.ThrowIfNull(labels);
+        if (labels is null)
+            throw new ArgumentNullException(nameof(labels));
         if (obj is null || !_byObject.TryGetValue(obj, out var entry) || entry.Deleted || entry.Table.SetLabels is null)
         {
             AddDiagnostic("EXAD0202", DiagnosticSeverity.Error, ".", "This table has no writable labels field.");
             return;
         }
 
-        var canonical = labels.Where(static value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var canonical = labels
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static value => value, StringComparer.Ordinal)
+            .ToArray();
         entry.Table.SetLabels(entry.Asset, canonical);
         entry.Dirty = true;
         PublishEditingIfReady();
@@ -728,7 +882,7 @@ public class AssetDatabaseSession : IDisposable
 
     internal bool ResolveConflict(ConflictId id, ConflictResolutionAction action)
     {
-        if (!Enum.IsDefined(action))
+        if (!Enum.IsDefined(typeof(ConflictResolutionAction), action))
         {
             AddDiagnostic("EXAD0300", DiagnosticSeverity.Error, id.Value.ToString("N"), "Unknown conflict resolution action.");
             return false;
@@ -886,7 +1040,9 @@ public class AssetDatabaseSession : IDisposable
                 : 1;
             entry.PersistedWorkbook = entry.Workbook;
             entry.PersistedKey = entry.Key;
+            entry.PersistedAsset = entry.Table.CloneAsset(entry.Asset);
             entry.Dirty = false;
+            entry.AdvanceEditorRevision();
         }
 
         foreach (var entry in saved)
@@ -1122,11 +1278,16 @@ public class AssetDatabaseSession : IDisposable
 
     internal static string NormalizePath(string path)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("Value cannot be null or whitespace.", nameof(path));
         return path.Replace('\\', '/').TrimEnd('/');
     }
 
-    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+    private void ThrowIfDisposed()
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(AssetDatabaseSession));
+    }
 
     private void EnsureNotPublishing()
     {
@@ -1158,6 +1319,15 @@ public class AssetDatabaseSession : IDisposable
         public bool HasTable(string tableName) => AvailableTables?.Contains(tableName) ?? true;
     }
 
+    private sealed class ObjectReferenceEqualityComparer : IEqualityComparer<object>
+    {
+        public static ObjectReferenceEqualityComparer Instance { get; } = new();
+
+        public new bool Equals(object? left, object? right) => ReferenceEquals(left, right);
+
+        public int GetHashCode(object value) => RuntimeHelpers.GetHashCode(value);
+    }
+
     private sealed class AssetEntry(
         WorkbookState workbook,
         AuthoringTableRegistration table,
@@ -1168,6 +1338,7 @@ public class AssetDatabaseSession : IDisposable
         bool persisted)
     {
         private static long _nextOrder;
+        private static long _nextEditorRevision;
         public WorkbookState Workbook { get; set; } = workbook;
         public AuthoringTableRegistration Table { get; } = table;
         public GUID Guid { get; } = guid;
@@ -1176,11 +1347,17 @@ public class AssetDatabaseSession : IDisposable
         public uint Revision { get; set; } = revision;
         public WorkbookState? PersistedWorkbook { get; set; } = persisted ? workbook : null;
         public string? PersistedKey { get; set; } = persisted ? key : null;
+        public object? PersistedAsset { get; set; } = persisted ? table.CloneAsset(asset) : null;
         public bool Dirty { get; set; }
         public bool Deleted { get; set; }
+        public long EditorRevision { get; private set; } = NextEditorRevision();
         public HashSet<AssetEntry> ImpactClosure { get; } = [];
         public long Order { get; } = Interlocked.Increment(ref _nextOrder);
         public string Path => $"{Workbook.Path}/{Table.TableName}/{Key}";
+
+        public void AdvanceEditorRevision() => EditorRevision = NextEditorRevision();
+
+        private static long NextEditorRevision() => Interlocked.Increment(ref _nextEditorRevision);
     }
 
     private sealed class Activation(AssetDatabaseSession owner) : IDisposable

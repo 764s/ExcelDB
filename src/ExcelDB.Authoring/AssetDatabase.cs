@@ -4,6 +4,8 @@ namespace ExcelDbEditor;
 
 public static class AssetDatabase
 {
+    public static bool IsAuthoringEnabled => AssetDatabaseSession.Current.Mode == RuntimeMode.EditorAuthoring;
+
     public static event Action<ImportReport>? workbookImported
     {
         add => AssetDatabaseSession.Current.WorkbookImported += value;
@@ -31,8 +33,10 @@ public static class AssetDatabase
     public static bool DeleteAsset(string path) => AssetDatabaseSession.Current.Delete(path);
     public static bool DeleteAssets(string[] paths, List<string> outFailedPaths)
     {
-        ArgumentNullException.ThrowIfNull(paths);
-        ArgumentNullException.ThrowIfNull(outFailedPaths);
+        if (paths is null)
+            throw new ArgumentNullException(nameof(paths));
+        if (outFailedPaths is null)
+            throw new ArgumentNullException(nameof(outFailedPaths));
         var succeeded = true;
         foreach (var path in paths)
         {
@@ -52,6 +56,11 @@ public static class AssetDatabase
     public static void SaveAssets() => AssetDatabaseSession.Current.SaveAll();
     public static void SaveAssetIfDirty(object obj) => AssetDatabaseSession.Current.SaveOne(obj);
     public static void SaveAssetIfDirty(GUID guid) => AssetDatabaseSession.Current.SaveOne(guid);
+    public static bool IsDirty(object obj) => AssetDatabaseSession.Current.IsAssetDirty(obj);
+    public static bool IsDirty(GUID guid) => AssetDatabaseSession.Current.IsAssetDirty(guid);
+    public static string GetAssetRevisionToken(object obj) => AssetDatabaseSession.Current.GetAssetRevisionToken(obj);
+    public static bool DiscardAssetChanges(object obj) => AssetDatabaseSession.Current.DiscardChanges(obj);
+    public static bool DiscardAssetChanges(GUID guid) => AssetDatabaseSession.Current.DiscardChanges(guid);
     public static string[] GetDependencies(string pathName) => AssetDatabaseSession.Current.Dependencies(pathName, recursive: true);
     public static string[] GetDependencies(string pathName, bool recursive) => AssetDatabaseSession.Current.Dependencies(pathName, recursive);
     public static string[] GetLabels(object obj) => AssetDatabaseSession.Current.GetLabels(obj);

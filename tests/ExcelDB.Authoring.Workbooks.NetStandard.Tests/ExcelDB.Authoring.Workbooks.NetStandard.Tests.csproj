@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\ExcelDB.Authoring.Workbooks.Tests\IntegrationTestSupport.cs"
+             Link="IntegrationTestSupport.cs" />
+    <Compile Include="..\ExcelDB.Authoring.Workbooks.Tests\XlsxAuthoringWorkbookAdapterTests.cs"
+             Link="XlsxAuthoringWorkbookAdapterTests.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ExcelDB.Authoring.Workbooks\ExcelDB.Authoring.Workbooks.csproj"
+                      AdditionalProperties="TargetFramework=netstandard2.1"
+                      SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\..\src\ExcelDB.Authoring\ExcelDB.Authoring.csproj"
+                      AdditionalProperties="TargetFramework=netstandard2.1"
+                      SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\..\src\ExcelDB.Workbooks\ExcelDB.Workbooks.csproj"
+                      AdditionalProperties="TargetFramework=netstandard2.1"
+                      SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\..\src\ExcelDB.Runtime\ExcelDB.Runtime.csproj"
+                      AdditionalProperties="TargetFramework=netstandard2.1"
+                      SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\..\src\ExcelDB.Core\ExcelDB.Core.csproj"
+                      AdditionalProperties="TargetFramework=netstandard2.1"
+                      SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\..\src\ExcelDB.Schema.Model\ExcelDB.Schema.Model.csproj"
+                      AdditionalProperties="TargetFramework=netstandard2.1"
+                      SkipGetTargetFrameworkProperties="true" />
+  </ItemGroup>
+
+</Project>

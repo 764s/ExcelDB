@@ -30,7 +30,7 @@ public static class WorkbookOwnership
         int row,
         int column)
     {
-        ArgumentNullException.ThrowIfNull(workbook);
+        Guard.NotNull(workbook);
         if (string.Equals(sheetName, WorkbookProtocol.MetadataSheetName, StringComparison.Ordinal)
             || string.Equals(sheetName, WorkbookProtocol.KeySheetName, StringComparison.Ordinal))
         {
@@ -60,8 +60,8 @@ public sealed class IdentityOnlyImpactClosureProvider : IImpactClosureProvider
         IEnumerable<AssetIdentity> seeds,
         ImportSnapshot snapshot)
     {
-        ArgumentNullException.ThrowIfNull(seeds);
-        ArgumentNullException.ThrowIfNull(snapshot);
+        Guard.NotNull(seeds);
+        Guard.NotNull(snapshot);
         return seeds.ToImmutableHashSet();
     }
 }
@@ -87,10 +87,10 @@ public sealed record WorkbookWritePlan(
         IReadOnlyDictionary<AssetIdentity, DraftChange> changes,
         IImpactClosureProvider? impactClosureProvider = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(workbookPath);
-        ArgumentNullException.ThrowIfNull(workbook);
-        ArgumentNullException.ThrowIfNull(snapshot);
-        ArgumentNullException.ThrowIfNull(changes);
+        Guard.NotNullOrWhiteSpace(workbookPath);
+        Guard.NotNull(workbook);
+        Guard.NotNull(snapshot);
+        Guard.NotNull(changes);
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
         var closureProvider = impactClosureProvider ?? new IdentityOnlyImpactClosureProvider();
         var seeds = changes.Keys.ToImmutableHashSet();
@@ -403,7 +403,7 @@ public sealed record WorkbookWritePlan(
         }
         foreach (var revision in revisions)
             builder.Append("\nr|").Append(revision.Identity).Append('|').Append(revision.Before).Append('|').Append(revision.After);
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
+        return HashUtility.Sha256Upper(Encoding.UTF8.GetBytes(builder.ToString()))
             .ToLowerInvariant();
     }
 }
@@ -419,7 +419,7 @@ public static class WorkbookWriteService
 
     public static PreparedWorkbookWrite Prepare(WorkbookWritePlan plan)
     {
-        ArgumentNullException.ThrowIfNull(plan);
+        Guard.NotNull(plan);
         if (!plan.CanApply)
             throw new InvalidOperationException("Write plan contains diagnostics that block commit.");
         var source = File.ReadAllBytes(plan.WorkbookPath);
@@ -435,7 +435,7 @@ public static class WorkbookWriteService
 
     public static OperationReport Apply(WorkbookWritePlan plan)
     {
-        ArgumentNullException.ThrowIfNull(plan);
+        Guard.NotNull(plan);
         if (!plan.CanApply)
         {
             return new OperationReport(

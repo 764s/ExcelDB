@@ -35,8 +35,8 @@ public sealed record IdentityWritePlan(
         IdentityScanResult scan,
         WorkbookSource source)
     {
-        ArgumentNullException.ThrowIfNull(scan);
-        ArgumentNullException.ThrowIfNull(source);
+        Guard.NotNull(scan);
+        Guard.NotNull(source);
         if (scan.HasBlockers)
             throw new InvalidOperationException("Identity scan has blockers; data prepare cannot be planned.");
         var assignments = scan.Observations
@@ -55,9 +55,9 @@ public sealed record IdentityWritePlan(
         WorkbookSource source,
         IEnumerable<RowLocation> selectedRows)
     {
-        ArgumentNullException.ThrowIfNull(scan);
-        ArgumentNullException.ThrowIfNull(source);
-        ArgumentNullException.ThrowIfNull(selectedRows);
+        Guard.NotNull(scan);
+        Guard.NotNull(source);
+        Guard.NotNull(selectedRows);
         var selected = selectedRows.ToHashSet();
         var observations = scan.Observations
             .Where(observation => IsSource(observation, source) && selected.Contains(observation.Location))
@@ -118,7 +118,7 @@ public sealed record IdentityWritePlan(
                 .Append(assignment.ExpectedBusinessHash);
         }
 
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
+        return HashUtility.Sha256Upper(Encoding.UTF8.GetBytes(builder.ToString()))
             .ToLowerInvariant();
     }
 }
@@ -129,9 +129,13 @@ public static class IdentityWriteService
 
     public static OperationReport Apply(
         IdentityWritePlan plan,
+#if NETSTANDARD2_1
+        IReadOnlyCollection<RowGuid>? occupiedProjectGuids = null)
+#else
         IReadOnlySet<RowGuid>? occupiedProjectGuids = null)
+#endif
     {
-        ArgumentNullException.ThrowIfNull(plan);
+        Guard.NotNull(plan);
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
         if (!File.Exists(plan.WorkbookPath))
         {
@@ -290,7 +294,7 @@ public static class IdentityWriteService
             }
         }
 
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
+        return HashUtility.Sha256Upper(Encoding.UTF8.GetBytes(builder.ToString()))
             .ToLowerInvariant();
     }
 }

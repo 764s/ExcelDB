@@ -199,9 +199,20 @@ public sealed class SchemaCodeGenerator
         builder.AppendLine("    MessageMapChildTable = 3,");
         builder.AppendLine("    PropertyGroup = 4,");
         builder.AppendLine("}");
+        builder.AppendLine("public enum GeneratedFieldShape");
+        builder.AppendLine("{");
+        builder.AppendLine("    Scalar = 1,");
+        builder.AppendLine("    Enum = 2,");
+        builder.AppendLine("    Message = 3,");
+        builder.AppendLine("    RepeatedScalar = 4,");
+        builder.AppendLine("    RepeatedEnum = 5,");
+        builder.AppendLine("    RepeatedMessage = 6,");
+        builder.AppendLine("    Map = 7,");
+        builder.AppendLine("    OneOfVariant = 8,");
+        builder.AppendLine("}");
         builder.AppendLine("public sealed class GeneratedFieldBinding");
         builder.AppendLine("{");
-        builder.AppendLine("    public GeneratedFieldBinding(int fieldId, int[] fieldIdPath, string propertyPath, string memberPath, string? displayName, string? headerComment, string[] aliases, GeneratedPhysicalFieldKind physicalKind, string? childSheet, string? parentGuidColumn, string? ordinalColumn, string? mapKeyColumn, Func<string, object?> parser, Func<object?, string> writer, string accessorId, string patcherId)");
+        builder.AppendLine("    public GeneratedFieldBinding(int fieldId, int[] fieldIdPath, string propertyPath, string memberPath, string? displayName, string? headerComment, string[] aliases, GeneratedPhysicalFieldKind physicalKind, GeneratedFieldShape shape, bool hasPresence, bool required, int keyOrder, string? referenceTable, string? referenceGroup, string? childSheet, string? parentGuidColumn, string? ordinalColumn, string? mapKeyColumn, Func<string, object?> parser, Func<object?, string> writer, string accessorId, string patcherId)");
         builder.AppendLine("    {");
         builder.AppendLine("        FieldId = fieldId;");
         builder.AppendLine("        FieldIdPath = Array.AsReadOnly(fieldIdPath);");
@@ -211,6 +222,12 @@ public sealed class SchemaCodeGenerator
         builder.AppendLine("        HeaderComment = headerComment;");
         builder.AppendLine("        Aliases = Array.AsReadOnly(aliases);");
         builder.AppendLine("        PhysicalKind = physicalKind;");
+        builder.AppendLine("        Shape = shape;");
+        builder.AppendLine("        HasPresence = hasPresence;");
+        builder.AppendLine("        Required = required;");
+        builder.AppendLine("        KeyOrder = keyOrder;");
+        builder.AppendLine("        ReferenceTable = referenceTable;");
+        builder.AppendLine("        ReferenceGroup = referenceGroup;");
         builder.AppendLine("        ChildSheet = childSheet;");
         builder.AppendLine("        ParentGuidColumn = parentGuidColumn;");
         builder.AppendLine("        OrdinalColumn = ordinalColumn;");
@@ -228,6 +245,12 @@ public sealed class SchemaCodeGenerator
         builder.AppendLine("    public string? HeaderComment { get; }");
         builder.AppendLine("    public IReadOnlyList<string> Aliases { get; }");
         builder.AppendLine("    public GeneratedPhysicalFieldKind PhysicalKind { get; }");
+        builder.AppendLine("    public GeneratedFieldShape Shape { get; }");
+        builder.AppendLine("    public bool HasPresence { get; }");
+        builder.AppendLine("    public bool Required { get; }");
+        builder.AppendLine("    public int KeyOrder { get; }");
+        builder.AppendLine("    public string? ReferenceTable { get; }");
+        builder.AppendLine("    public string? ReferenceGroup { get; }");
         builder.AppendLine("    public string? ChildSheet { get; }");
         builder.AppendLine("    public string? ParentGuidColumn { get; }");
         builder.AppendLine("    public string? OrdinalColumn { get; }");
@@ -241,7 +264,7 @@ public sealed class SchemaCodeGenerator
         {
             builder.AppendLine("public sealed class GeneratedTableBinding");
             builder.AppendLine("{");
-            builder.AppendLine("    public GeneratedTableBinding(int tableId, string fullName, string? displayName, Type clrType, string factoryId, string accessorId, string patcherId, IReadOnlyList<GeneratedFieldBinding> fields)");
+            builder.AppendLine("    public GeneratedTableBinding(int tableId, string fullName, string? displayName, Type clrType, string factoryId, string accessorId, string patcherId, string[] implements, IReadOnlyList<GeneratedFieldBinding> fields)");
             builder.AppendLine("    {");
             builder.AppendLine("        TableId = tableId;");
             builder.AppendLine("        FullName = fullName;");
@@ -250,6 +273,7 @@ public sealed class SchemaCodeGenerator
             builder.AppendLine("        FactoryId = factoryId;");
             builder.AppendLine("        AccessorId = accessorId;");
             builder.AppendLine("        PatcherId = patcherId;");
+            builder.AppendLine("        Implements = Array.AsReadOnly(implements);");
             builder.AppendLine("        Fields = fields;");
             builder.AppendLine("    }");
             builder.AppendLine("    public int TableId { get; }");
@@ -259,6 +283,7 @@ public sealed class SchemaCodeGenerator
             builder.AppendLine("    public string FactoryId { get; }");
             builder.AppendLine("    public string AccessorId { get; }");
             builder.AppendLine("    public string PatcherId { get; }");
+            builder.AppendLine("    public IReadOnlyList<string> Implements { get; }");
             builder.AppendLine("    public IReadOnlyList<GeneratedFieldBinding> Fields { get; }");
             builder.AppendLine("}");
         }
@@ -422,7 +447,6 @@ public sealed class SchemaCodeGenerator
                 .OrderBy(static field => field.PropertyPath, StringComparer.Ordinal)
                 .ThenBy(static field => field.Id)
                 .ToArray();
-            var topLevelMembers = BuildMemberNames(table.Fields);
             builder.Append("        new(")
                 .Append(table.Id.ToString(CultureInfo.InvariantCulture)).Append(", ")
                 .Append(CSharpString(table.FullName)).Append(", ")
@@ -430,11 +454,12 @@ public sealed class SchemaCodeGenerator
                 .Append(typeNames[table.FullName]).Append("), ")
                 .Append(CSharpString($"factory:{table.Id}")).Append(", ")
                 .Append(CSharpString($"accessor:{table.Id}")).Append(", ")
-                .Append(CSharpString($"patcher:{table.Id}")).AppendLine(", Array.AsReadOnly(new GeneratedFieldBinding[]");
+                .Append(CSharpString($"patcher:{table.Id}")).Append(", ")
+                .Append(StringArrayExpression(table.Implements)).AppendLine(", Array.AsReadOnly(new GeneratedFieldBinding[]");
             builder.AppendLine("        {");
             foreach (var field in fields)
             {
-                var member = BuildMemberPath(field.PropertyPath, table.Fields, topLevelMembers);
+                var member = BuildMemberPath(table, field);
                 var codecName = CodecMethodName(table.Id, table.FullName, field);
                 var fieldType = GetCSharpType(field, typeNames);
                 var child = field.ChildTable;
@@ -447,6 +472,12 @@ public sealed class SchemaCodeGenerator
                     .Append(CSharpNullableString(field.HeaderComment)).Append(", ")
                     .Append(StringArrayExpression(field.Aliases)).Append(", ")
                     .Append(PhysicalKindExpression(field)).Append(", ")
+                    .Append(FieldShapeExpression(field.Shape)).Append(", ")
+                    .Append(field.HasPresence ? "true" : "false").Append(", ")
+                    .Append(field.Required ? "true" : "false").Append(", ")
+                    .Append(field.KeyOrder.ToString(CultureInfo.InvariantCulture)).Append(", ")
+                    .Append(CSharpNullableString(field.ReferenceTable)).Append(", ")
+                    .Append(CSharpNullableString(field.ReferenceGroup)).Append(", ")
                     .Append(CSharpNullableString(child?.SheetName)).Append(", ")
                     .Append(CSharpNullableString(child?.ParentGuidColumn)).Append(", ")
                     .Append(CSharpNullableString(child?.OrdinalColumn)).Append(", ")
@@ -1060,22 +1091,34 @@ public sealed class SchemaCodeGenerator
         return "GeneratedPhysicalFieldKind.Cell";
     }
 
-    private static string BuildMemberPath(
-        string propertyPath,
-        ImmutableArray<CanonicalFieldDescriptor> topLevelFields,
-        IReadOnlyDictionary<int, string> topLevelMembers)
+    private static string FieldShapeExpression(CanonicalFieldShape shape) => shape switch
     {
-        var segments = propertyPath.Split('.');
-        if (segments.Length == 0)
-            return propertyPath;
-        var top = topLevelFields.FirstOrDefault(field =>
-            string.Equals(field.Name, segments[0], StringComparison.Ordinal));
-        var first = top is not null && topLevelMembers.TryGetValue(top.Id, out var member)
-            ? member
-            : ToPascalIdentifier(segments[0]);
-        if (segments.Length == 1)
-            return first;
-        return $"{first}.{string.Join(".", segments.Skip(1).Select(ToPascalIdentifier))}";
+        CanonicalFieldShape.Scalar => "GeneratedFieldShape.Scalar",
+        CanonicalFieldShape.Enum => "GeneratedFieldShape.Enum",
+        CanonicalFieldShape.Message => "GeneratedFieldShape.Message",
+        CanonicalFieldShape.RepeatedScalar => "GeneratedFieldShape.RepeatedScalar",
+        CanonicalFieldShape.RepeatedEnum => "GeneratedFieldShape.RepeatedEnum",
+        CanonicalFieldShape.RepeatedMessage => "GeneratedFieldShape.RepeatedMessage",
+        CanonicalFieldShape.Map => "GeneratedFieldShape.Map",
+        CanonicalFieldShape.OneOfVariant => "GeneratedFieldShape.OneOfVariant",
+        _ => throw new ArgumentOutOfRangeException(nameof(shape), shape, "Unknown canonical field shape."),
+    };
+
+    private static string BuildMemberPath(
+        CanonicalTableDescriptor table,
+        CanonicalFieldDescriptor field)
+    {
+        var chain = ResolveFieldChain(table, field);
+        var members = new string[chain.Length];
+        var siblings = table.Fields;
+        for (var index = 0; index < chain.Length; index++)
+        {
+            var descriptor = chain[index];
+            members[index] = BuildMemberNames(siblings)[descriptor.Id];
+            siblings = descriptor.Children;
+        }
+
+        return string.Join(".", members);
     }
 
     private static string NormalizeNewLines(string value) =>

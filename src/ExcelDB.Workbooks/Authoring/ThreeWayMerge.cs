@@ -35,9 +35,9 @@ public static class ThreeWayMerge
         ImportSnapshot theirs,
         IReadOnlyDictionary<AssetIdentity, DraftChange> mine)
     {
-        ArgumentNullException.ThrowIfNull(@base);
-        ArgumentNullException.ThrowIfNull(theirs);
-        ArgumentNullException.ThrowIfNull(mine);
+        Guard.NotNull(@base);
+        Guard.NotNull(theirs);
+        Guard.NotNull(mine);
         var merged = ImmutableDictionary.CreateBuilder<AssetIdentity, SnapshotRow>();
         var conflicts = ImmutableArray.CreateBuilder<MergeConflict>();
         var identities = @base.Rows.Keys

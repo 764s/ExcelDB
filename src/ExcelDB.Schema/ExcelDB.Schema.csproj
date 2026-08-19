@@ -21,6 +21,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="Descriptors\CanonicalSchemaDescriptor.cs" />
+    <ProjectReference Include="..\ExcelDB.Schema.Model\ExcelDB.Schema.Model.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Protobuf Include="Protos\exceldb\options.proto"
               ProtoRoot="Protos"
               GrpcServices="None" />

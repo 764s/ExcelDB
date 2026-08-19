@@ -21,6 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\ExcelDB.Schema.Model\ExcelDB.Schema.Model.csproj" />
     <ProjectReference Include="..\..\src\ExcelDB.Workbooks\ExcelDB.Workbooks.csproj" />
   </ItemGroup>
 

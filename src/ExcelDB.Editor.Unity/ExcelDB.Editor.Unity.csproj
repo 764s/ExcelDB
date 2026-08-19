@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;netstandard2.1</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <LangVersion>9.0</LangVersion>
@@ -12,24 +12,50 @@
     <Version>0.1.0</Version>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\ExcelDB.Authoring\ExcelDB.Authoring.csproj" />
+    <ProjectReference Include="..\ExcelDB.Authoring.Workbooks\ExcelDB.Authoring.Workbooks.csproj" />
+    <ProjectReference Include="..\ExcelDB.Editor.Model\ExcelDB.Editor.Model.csproj" />
+    <ProjectReference Include="..\ExcelDB.Schema.Model\ExcelDB.Schema.Model.csproj" />
+    <ProjectReference Include="..\ExcelDB.Workbooks\ExcelDB.Workbooks.csproj" />
+  </ItemGroup>
+  <ItemGroup>
     <None Update="package.json" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="upm\" />
     <None Update="Editor\ExcelDb.Editor.Unity.asmdef" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="upm\Editor\ExcelDb.Editor.Unity.asmdef" />
     <None Include="Editor\**\*.cs" Pack="true" PackagePath="upm\Editor\%(RecursiveDir)%(Filename)%(Extension)" Visible="false" />
   </ItemGroup>
 
-  <Target Name="BuildUnityPackage" AfterTargets="Build">
+  <Target Name="BuildUnityPackage"
+          AfterTargets="Build"
+          Condition="'$(TargetFramework)' == 'netstandard2.1'">
     <PropertyGroup>
       <UnityPackageRoot>$(MSBuildProjectDirectory)\..\..\artifacts\upm\com.exceldb.editor</UnityPackageRoot>
       <UnityEditorRoot>$(UnityPackageRoot)\Editor</UnityEditorRoot>
+      <UnityEditorPluginRoot>$(UnityEditorRoot)\Plugins</UnityEditorPluginRoot>
     </PropertyGroup>
     <ItemGroup>
       <UnityEditorSource Include="Editor\**\*.cs" />
+      <UnityEditorBusinessAssembly Include="$(TargetDir)ExcelDB.Authoring.dll" />
+      <UnityEditorBusinessAssembly Include="$(TargetDir)ExcelDB.Authoring.Workbooks.dll" />
+      <UnityEditorBusinessAssembly Include="$(TargetDir)ExcelDB.Editor.Model.dll" />
+      <UnityEditorBusinessAssembly Include="$(TargetDir)ExcelDB.Schema.Model.dll" />
+      <UnityEditorBusinessAssembly Include="$(TargetDir)ExcelDB.Workbooks.dll" />
     </ItemGroup>
     <RemoveDir Directories="$(UnityPackageRoot)" />
-    <MakeDir Directories="$(UnityEditorRoot)" />
+    <MakeDir Directories="$(UnityEditorRoot);$(UnityEditorPluginRoot)" />
     <Copy SourceFiles="package.json" DestinationFolder="$(UnityPackageRoot)" />
     <Copy SourceFiles="Editor\ExcelDb.Editor.Unity.asmdef" DestinationFolder="$(UnityEditorRoot)" />
     <Copy SourceFiles="@(UnityEditorSource)"
           DestinationFiles="@(UnityEditorSource->'$(UnityEditorRoot)\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Error Condition="!Exists('$(TargetDir)ExcelDB.Authoring.dll')"
+           Text="The Unity editor package requires the netstandard2.1 ExcelDB.Authoring.dll output." />
+    <Error Condition="!Exists('$(TargetDir)ExcelDB.Authoring.Workbooks.dll')"
+           Text="The Unity editor package requires the netstandard2.1 ExcelDB.Authoring.Workbooks.dll output." />
+    <Error Condition="!Exists('$(TargetDir)ExcelDB.Editor.Model.dll')"
+           Text="The Unity editor package requires the netstandard2.1 ExcelDB.Editor.Model.dll output." />
+    <Error Condition="!Exists('$(TargetDir)ExcelDB.Schema.Model.dll')"
+           Text="The Unity editor package requires the netstandard2.1 ExcelDB.Schema.Model.dll output." />
+    <Error Condition="!Exists('$(TargetDir)ExcelDB.Workbooks.dll')"
+           Text="The Unity editor package requires the netstandard2.1 ExcelDB.Workbooks.dll output." />
+    <Copy SourceFiles="@(UnityEditorBusinessAssembly)" DestinationFolder="$(UnityEditorPluginRoot)" />
   </Target>
 </Project>

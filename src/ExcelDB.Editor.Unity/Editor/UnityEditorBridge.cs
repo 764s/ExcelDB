@@ -1,6 +1,7 @@
 #if UNITY_EDITOR || EXCELDB_DOTNET_VALIDATE
 using System;
 using System.Collections.Generic;
+using ExcelDb.Editor.Model;
 
 namespace ExcelDb.Editor.Unity
 {
@@ -304,6 +305,19 @@ public interface IExcelDbUnityEditorBridge
     UnityEditorPlayView GetPlayState();
     void SwitchPlaySource();
     void SetHotReload(bool enabled);
+}
+
+/// <summary>
+/// Optional typed-property capability implemented by a trusted host. The host only resolves the
+/// generated binding and resident asset; this package owns staging, revision tracking, dirty state,
+/// property drawing and Unity Undo/Redo integration.
+/// </summary>
+public interface IExcelDbUnityPropertyBridge
+{
+    bool TryResolveEditorAsset(
+        string guid,
+        out object? residentAsset,
+        out EditorObjectBinding? binding);
 }
 
 public static class ExcelDbUnityEditorBridge

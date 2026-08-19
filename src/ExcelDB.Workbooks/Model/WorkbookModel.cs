@@ -29,7 +29,7 @@ public sealed record WorkbookCell(string? Text = null, string? Formula = null)
 
     public static WorkbookCell FormulaCell(string formula, string? cachedValue = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(formula);
+        Guard.NotNullOrWhiteSpace(formula);
         return new WorkbookCell(cachedValue, formula);
     }
 }
@@ -115,7 +115,7 @@ public sealed record WorkbookDefinition(
 
     public static WorkbookDefinition Empty(CanonicalSchemaDescriptor schema, Guid? workbookGuid = null)
     {
-        ArgumentNullException.ThrowIfNull(schema);
+        Guard.NotNull(schema);
         return new WorkbookDefinition(
             workbookGuid ?? Guid.NewGuid(),
             schema.SchemaHash,
@@ -133,7 +133,7 @@ public static class WorkbookLayout
 {
     public static WorkbookTable CreateTable(CanonicalTableDescriptor table)
     {
-        ArgumentNullException.ThrowIfNull(table);
+        Guard.NotNull(table);
         return new WorkbookTable(
             table.Id,
             table.Name,

@@ -93,10 +93,10 @@ public static class WorkbookImporter
         CellFormatRegistry? cellFormats = null,
         WorkbookValidatorRegistry? validators = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(workbookPath);
-        ArgumentNullException.ThrowIfNull(workbookBytes);
-        ArgumentNullException.ThrowIfNull(workbook);
-        ArgumentNullException.ThrowIfNull(schema);
+        Guard.NotNullOrWhiteSpace(workbookPath);
+        Guard.NotNull(workbookBytes);
+        Guard.NotNull(workbook);
+        Guard.NotNull(schema);
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
         if (workbook.SchemaHash != schema.SchemaHash)
         {
@@ -809,8 +809,8 @@ public static class CanonicalCellParser
         CanonicalSchemaDescriptor schema,
         CellFormatRegistry? formats = null)
     {
-        ArgumentNullException.ThrowIfNull(field);
-        ArgumentNullException.ThrowIfNull(schema);
+        Guard.NotNull(field);
+        Guard.NotNull(schema);
         if (cell is null || (cell.Formula is null && string.IsNullOrEmpty(cell.Text)))
         {
             var rawMissing = CanonicalValue.Missing;

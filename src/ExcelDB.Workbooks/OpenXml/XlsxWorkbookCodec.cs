@@ -53,7 +53,7 @@ public static class XlsxWorkbookCodec
 
     public static byte[] Write(WorkbookDefinition workbook)
     {
-        ArgumentNullException.ThrowIfNull(workbook);
+        Guard.NotNull(workbook);
 
         var sheets = new List<SheetPart>();
         foreach (var table in workbook.Tables.OrderBy(static table => table.TableId))
@@ -113,8 +113,8 @@ public static class XlsxWorkbookCodec
         WorkbookDefinition projectedWorkbook,
         bool purgeUnownedCells = false)
     {
-        ArgumentNullException.ThrowIfNull(packageBytes);
-        ArgumentNullException.ThrowIfNull(projectedWorkbook);
+        Guard.NotNull(packageBytes);
+        Guard.NotNull(projectedWorkbook);
 
         var sourceWorkbook = Read(packageBytes);
         var package = OpenPackage(packageBytes);
@@ -275,7 +275,7 @@ public static class XlsxWorkbookCodec
 
     public static WorkbookDefinition Read(byte[] packageBytes)
     {
-        ArgumentNullException.ThrowIfNull(packageBytes);
+        Guard.NotNull(packageBytes);
         var package = OpenPackage(packageBytes);
         if (!package.Sheets.TryGetValue(WorkbookProtocol.MetadataSheetName, out var metadataPart))
             throw new InvalidDataException($"Missing hidden worksheet '{WorkbookProtocol.MetadataSheetName}'.");
@@ -353,8 +353,8 @@ public static class XlsxWorkbookCodec
         byte[] packageBytes,
         CanonicalSchemaDescriptor schema)
     {
-        ArgumentNullException.ThrowIfNull(packageBytes);
-        ArgumentNullException.ThrowIfNull(schema);
+        Guard.NotNull(packageBytes);
+        Guard.NotNull(schema);
         var package = OpenPackage(packageBytes);
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
         var repairs = ImmutableArray.CreateBuilder<string>();
@@ -590,7 +590,10 @@ public static class XlsxWorkbookCodec
                 repairs.Add($"table.{table.TableId}.data-validations");
         }
 
-        var repairItems = repairs.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToImmutableArray();
+        var repairItems = repairs
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static repair => repair, StringComparer.Ordinal)
+            .ToImmutableArray();
         var plan = repairItems.IsEmpty
             ? null
             : new WorkbookProjectionRepairPlan(fingerprint, workbook, repairItems);
@@ -601,8 +604,8 @@ public static class XlsxWorkbookCodec
         byte[] packageBytes,
         WorkbookProjectionRepairPlan plan)
     {
-        ArgumentNullException.ThrowIfNull(packageBytes);
-        ArgumentNullException.ThrowIfNull(plan);
+        Guard.NotNull(packageBytes);
+        Guard.NotNull(plan);
         if (ContentFingerprint.FromBytes(packageBytes) != plan.SourceFingerprint)
         {
             return new WorkbookProjectionRepairResult(
@@ -643,8 +646,8 @@ public static class XlsxWorkbookCodec
 
     public static byte[] PatchCells(byte[] packageBytes, IEnumerable<CellPatch> patches)
     {
-        ArgumentNullException.ThrowIfNull(packageBytes);
-        ArgumentNullException.ThrowIfNull(patches);
+        Guard.NotNull(packageBytes);
+        Guard.NotNull(patches);
         var patchArray = patches.ToArray();
         var duplicate = patchArray
             .GroupBy(static patch => (patch.SheetName, patch.Row, patch.Column))
@@ -681,8 +684,8 @@ public static class XlsxWorkbookCodec
 
     public static WorkbookCell? ReadCell(byte[] packageBytes, string sheetName, int row, int column)
     {
-        ArgumentNullException.ThrowIfNull(packageBytes);
-        ArgumentException.ThrowIfNullOrWhiteSpace(sheetName);
+        Guard.NotNull(packageBytes);
+        Guard.NotNullOrWhiteSpace(sheetName);
         if (row <= 0)
             throw new ArgumentOutOfRangeException(nameof(row));
         if (column <= 0)
@@ -696,8 +699,8 @@ public static class XlsxWorkbookCodec
 
     public static bool IsSheetHidden(byte[] packageBytes, string sheetName)
     {
-        ArgumentNullException.ThrowIfNull(packageBytes);
-        ArgumentException.ThrowIfNullOrWhiteSpace(sheetName);
+        Guard.NotNull(packageBytes);
+        Guard.NotNullOrWhiteSpace(sheetName);
         var package = OpenPackage(packageBytes);
         if (!package.SheetStates.TryGetValue(sheetName, out var state))
             throw new InvalidDataException($"Worksheet '{sheetName}' does not exist.");
@@ -812,7 +815,7 @@ public static class XlsxWorkbookCodec
             MetadataRow("workbook", "saved_utc", value: workbook.SavedUtc.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)),
         };
 
-        foreach (var marker in workbook.EffectiveMigrationMarkers.Order(StringComparer.Ordinal))
+        foreach (var marker in workbook.EffectiveMigrationMarkers.OrderBy(static marker => marker, StringComparer.Ordinal))
         {
             ParseMigrationMarker(marker, out var migrationId, out var migrationVersion);
             rows.Add(MetadataRow(
@@ -1012,7 +1015,7 @@ public static class XlsxWorkbookCodec
                 item.Attribute("allowBlank")?.Value,
                 item.Attribute("sqref")?.Value,
                 item.Element(Spreadsheet + "formula1")?.Value))
-            .Order(StringComparer.Ordinal)
+            .OrderBy(static marker => marker, StringComparer.Ordinal)
         ?? Enumerable.Empty<string>();
 
     private static byte[] RepairProjectionPackage(
@@ -1696,7 +1699,7 @@ public static class XlsxWorkbookCodec
     private static string AllocateWorksheetPart(
         IEnumerable<string> existingPartNames,
         IEnumerable<PackageEntry> addedEntries,
-        IReadOnlySet<string> removedParts)
+        IReadOnlyCollection<string> removedParts)
     {
         var names = existingPartNames
             .Concat(addedEntries.Select(static entry => entry.Name))
@@ -1943,12 +1946,12 @@ public static class XlsxWorkbookCodec
                 throw new InvalidDataException($"Duplicate migration marker '{marker}'.");
             markers.Add(marker);
         }
-        return markers.Order(StringComparer.Ordinal).ToImmutableArray();
+        return markers.OrderBy(static marker => marker, StringComparer.Ordinal).ToImmutableArray();
     }
 
     private static void ParseMigrationMarker(string marker, out string id, out int version)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(marker);
+        Guard.NotNullOrWhiteSpace(marker);
         var separator = marker.LastIndexOf('@');
         if (separator <= 0
             || marker.IndexOf('@') != separator
@@ -2398,7 +2401,7 @@ public static class XlsxWorkbookCodec
         row = 0;
         column = 0;
         var index = 0;
-        while (index < reference.Length && char.IsAsciiLetter(reference[index]))
+        while (index < reference.Length && PlatformCompatibility.IsAsciiLetter(reference[index]))
         {
             var letter = char.ToUpperInvariant(reference[index]);
             column = checked((column * 26) + (letter - 'A' + 1));

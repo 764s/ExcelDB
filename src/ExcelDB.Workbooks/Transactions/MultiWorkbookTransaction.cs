@@ -71,7 +71,7 @@ public static class MultiWorkbookTransaction
         IEnumerable<PreparedWorkbookWrite> writes,
         string? journalDirectory = null)
     {
-        ArgumentNullException.ThrowIfNull(writes);
+        Guard.NotNull(writes);
         var writeArray = writes.ToArray();
         if (writeArray.Length == 0)
             return Failure("multi-workbook-stage", "", "EXWB3100", "No workbook writes were supplied.");
@@ -153,7 +153,7 @@ public static class MultiWorkbookTransaction
 
     public static WorkbookTransactionResult CommitStaged(string journalPath)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(journalPath);
+        Guard.NotNullOrWhiteSpace(journalPath);
         WorkbookTransactionJournal journal;
         try
         {
@@ -175,7 +175,7 @@ public static class MultiWorkbookTransaction
             WriteJournal(journalPath, journal);
             foreach (var item in journal.Items)
             {
-                File.Move(item.StagePath, item.TargetPath, overwrite: true);
+                PlatformCompatibility.MoveOverwrite(item.StagePath, item.TargetPath);
                 item.Applied = true;
                 WriteJournal(journalPath, journal);
             }
@@ -223,7 +223,7 @@ public static class MultiWorkbookTransaction
 
     public static OperationReport Recover(string journalPath)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(journalPath);
+        Guard.NotNullOrWhiteSpace(journalPath);
         var journal = ReadJournal(journalPath);
         if (journal.Phase == WorkbookTransactionPhase.Committed)
         {
@@ -238,7 +238,7 @@ public static class MultiWorkbookTransaction
             {
                 if (!File.Exists(item.BackupPath))
                     throw new IOException($"Recovery backup is missing for '{item.TargetPath}'.");
-                File.Move(item.BackupPath, item.TargetPath, overwrite: true);
+                PlatformCompatibility.MoveOverwrite(item.BackupPath, item.TargetPath);
             }
             else if (File.Exists(item.TargetPath))
             {
@@ -260,7 +260,7 @@ public static class MultiWorkbookTransaction
 
     public static ImmutableArray<OperationReport> RecoverPending(string directory)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        Guard.NotNullOrWhiteSpace(directory);
         if (!Directory.Exists(directory))
             return [];
         var reports = ImmutableArray.CreateBuilder<OperationReport>();

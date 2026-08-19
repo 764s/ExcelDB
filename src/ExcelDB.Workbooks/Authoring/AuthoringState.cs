@@ -32,7 +32,7 @@ public sealed class AuthoringDraftStore
 
     public void Edit(AssetIdentity identity, string propertyPath, CanonicalValue value)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(propertyPath);
+        Guard.NotNullOrWhiteSpace(propertyPath);
         var current = GetEditable(identity);
         var values = current.Values.SetItem(propertyPath, value);
         var rawValue = value.State == CanonicalValueState.Defaulted
@@ -50,7 +50,7 @@ public sealed class AuthoringDraftStore
     /// <summary>A direct edit of key cells is represented as a rename, never as delete-plus-add.</summary>
     public void Rename(AssetIdentity identity, string newKey)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(newKey);
+        Guard.NotNullOrWhiteSpace(newKey);
         var current = GetEditable(identity);
         _changes[identity] = new DraftChange(
             CurrentKind(identity, DraftChangeKind.Renamed),
@@ -59,7 +59,7 @@ public sealed class AuthoringDraftStore
 
     public void Add(SnapshotRow row)
     {
-        ArgumentNullException.ThrowIfNull(row);
+        Guard.NotNull(row);
         if (row.Revision != 0)
             throw new ArgumentException("A new row must start at revision 0.", nameof(row));
         if (_latestSnapshot.Rows.ContainsKey(row.Identity) || _changes.ContainsKey(row.Identity))

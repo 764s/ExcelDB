@@ -25,7 +25,7 @@ public sealed class WorkbookFileWatcher : IDisposable
         TimeSpan? debounce = null,
         TimeSpan? stabilityWindow = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(workbookPath);
+        Guard.NotNullOrWhiteSpace(workbookPath);
         _scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
         _path = Path.GetFullPath(workbookPath);
         _debounce = debounce ?? TimeSpan.FromMilliseconds(150);
@@ -149,5 +149,5 @@ public sealed class WorkbookFileWatcher : IDisposable
         }
     }
 
-    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+    private void ThrowIfDisposed() => Guard.NotDisposed(_disposed, this);
 }

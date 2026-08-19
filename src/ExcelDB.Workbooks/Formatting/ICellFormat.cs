@@ -45,7 +45,7 @@ public sealed class CellFormatRegistry
 
     public CellFormatRegistry(IEnumerable<ICellFormat> formats)
     {
-        ArgumentNullException.ThrowIfNull(formats);
+        Guard.NotNull(formats);
         foreach (var format in formats)
             Register(format);
     }
@@ -54,15 +54,15 @@ public sealed class CellFormatRegistry
 
     public void Register(ICellFormat format)
     {
-        ArgumentNullException.ThrowIfNull(format);
-        ArgumentException.ThrowIfNullOrWhiteSpace(format.Identity);
+        Guard.NotNull(format);
+        Guard.NotNullOrWhiteSpace(format.Identity);
         if (!codecs.TryAdd(format.Identity, format))
             throw new InvalidOperationException($"Cell format codec '{format.Identity}' is already registered.");
     }
 
     public bool TryGetCodec(string identity, out ICellFormat? format)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(identity);
+        Guard.NotNullOrWhiteSpace(identity);
         return codecs.TryGetValue(identity, out format);
     }
 
@@ -71,7 +71,7 @@ public sealed class CellFormatRegistry
         out ICellFormat? format,
         out string? error)
     {
-        ArgumentNullException.ThrowIfNull(declaration);
+        Guard.NotNull(declaration);
         error = null;
         switch (declaration.Kind)
         {

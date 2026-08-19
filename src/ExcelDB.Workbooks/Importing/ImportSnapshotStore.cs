@@ -29,8 +29,8 @@ public static class ImportSnapshotStore
 
     public static void Save(string path, ImportSnapshot snapshot)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        ArgumentNullException.ThrowIfNull(snapshot);
+        Guard.NotNullOrWhiteSpace(path);
+        Guard.NotNull(snapshot);
         AtomicFile.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(ToDocument(snapshot), JsonOptions));
     }
 
@@ -39,8 +39,8 @@ public static class ImportSnapshotStore
         string expectedWorkbookPath,
         ulong expectedSchemaHash)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        ArgumentException.ThrowIfNullOrWhiteSpace(expectedWorkbookPath);
+        Guard.NotNullOrWhiteSpace(path);
+        Guard.NotNullOrWhiteSpace(expectedWorkbookPath);
         if (!File.Exists(path))
         {
             return Degraded(

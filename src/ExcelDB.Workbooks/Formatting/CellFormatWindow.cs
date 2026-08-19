@@ -124,8 +124,8 @@ public static class CanonicalCellWriter
         CanonicalSchemaDescriptor schema,
         CellFormatRegistry? formats = null)
     {
-        ArgumentNullException.ThrowIfNull(field);
-        ArgumentNullException.ThrowIfNull(schema);
+        Guard.NotNull(field);
+        Guard.NotNull(schema);
         switch (value.State)
         {
             case CanonicalValueState.Missing:

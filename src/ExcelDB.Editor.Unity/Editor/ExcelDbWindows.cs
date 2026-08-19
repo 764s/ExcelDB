@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
+using UnityEditor.Compilation;
 using UnityEngine;
 
 namespace ExcelDb.Editor.Unity
@@ -18,6 +19,11 @@ internal sealed class ExcelDbBrowserWindow : EditorWindow
     private Vector2 _treeScroll;
     private Vector2 _rowScroll;
     private Vector2 _inspectorScroll;
+    private ExcelDbAuthoringPropertyFactory? _propertyFactory;
+    private ExcelDbUnityUndoBridge? _propertyUndo;
+    private ExcelDbSerializedInspectorSession? _typedInspector;
+    private readonly ExcelDbPropertyGUIState _propertyGuiState = new ExcelDbPropertyGUIState();
+    private string _typedInspectorError = string.Empty;
 
     public static void ShowWindow()
     {
@@ -29,6 +35,14 @@ internal sealed class ExcelDbBrowserWindow : EditorWindow
         var window = GetWindow<ExcelDbBrowserWindow>("ExcelDB Browser");
         window._selectedGuid = guid ?? string.Empty;
         window.Repaint();
+    }
+
+    private void OnDisable()
+    {
+        DisposeTypedInspector();
+        _propertyUndo?.Dispose();
+        _propertyUndo = null;
+        _propertyFactory = null;
     }
 
     private void OnGUI()
@@ -48,6 +62,10 @@ internal sealed class ExcelDbBrowserWindow : EditorWindow
         }
 
         DrawToolbar(bridge);
+        if (ExcelDbEditorLifecycle.ReloadLocked)
+            EditorGUILayout.HelpBox(
+                "Script assembly reload is waiting for ExcelDB changes to be saved or reverted.",
+                MessageType.Warning);
         var rows = bridge.Search(_filter, _display);
         using (new EditorGUILayout.HorizontalScope())
         {
@@ -76,11 +94,31 @@ internal sealed class ExcelDbBrowserWindow : EditorWindow
             {
                 if (bridge.Conflicts.Count != 0)
                     ExcelDbConflictWindow.ShowWindow();
+                else if (_typedInspector != null && !_typedInspector.TryApplyPendingChanges())
+                    _typedInspectorError =
+                        "Save All was cancelled because the selected row has a concurrent edit conflict.";
                 else
+                {
                     bridge.SaveAll();
+                    if (_typedInspector == null || _typedInspector.MarkSavedIfClean())
+                        _typedInspectorError = string.Empty;
+                    else
+                        _typedInspectorError =
+                            "Save All completed without confirming the selected row as clean.";
+                }
             }
             if (GUILayout.Button("Refresh", EditorStyles.toolbarButton))
-                bridge.Refresh();
+            {
+                if (_typedInspector != null && !_typedInspector.TryApplyPendingChanges())
+                    _typedInspectorError =
+                        "Refresh was cancelled because the selected row has a concurrent edit conflict.";
+                else
+                {
+                    bridge.Refresh();
+                    _typedInspector?.RefreshFromResident();
+                    _typedInspectorError = string.Empty;
+                }
+            }
         }
     }
 
@@ -156,6 +194,7 @@ internal sealed class ExcelDbBrowserWindow : EditorWindow
                 {
                     DragAndDrop.PrepareStartDrag();
                     DragAndDrop.SetGenericData(ExcelDbRowReferenceDrag.PayloadName, row.Guid);
+                    DragAndDrop.SetGenericData(ExcelDbRowReferenceDrag.RowPayloadName, row);
                     DragAndDrop.objectReferences = Array.Empty<UnityEngine.Object>();
                     DragAndDrop.StartDrag(row.Table + "/" + row.Key);
                     current.Use();
@@ -176,16 +215,140 @@ internal sealed class ExcelDbBrowserWindow : EditorWindow
                 return;
             }
             _inspectorScroll = EditorGUILayout.BeginScrollView(_inspectorScroll);
-            foreach (var line in bridge.InspectAsset(_selectedGuid))
-                EditorGUILayout.SelectableLabel(line, GUILayout.Height(EditorGUIUtility.singleLineHeight));
-            using (new EditorGUILayout.HorizontalScope())
+            var typed = GetTypedInspector(bridge);
+            if (typed == null)
             {
-                if (GUILayout.Button("Save")) bridge.SaveAsset(_selectedGuid);
-                if (GUILayout.Button("Undo")) bridge.RevertAsset(_selectedGuid);
-                if (GUILayout.Button("Excel")) bridge.OpenInExcel(_selectedGuid);
+                if (_typedInspectorError.Length != 0)
+                    EditorGUILayout.HelpBox(_typedInspectorError, MessageType.Warning);
+                foreach (var line in bridge.InspectAsset(_selectedGuid))
+                    EditorGUILayout.SelectableLabel(line, GUILayout.Height(EditorGUIUtility.singleLineHeight));
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    using (new EditorGUI.DisabledScope(!ExcelDbEditor.AssetDatabase.IsAuthoringEnabled))
+                    {
+                        if (GUILayout.Button("Save")) bridge.SaveAsset(_selectedGuid);
+                        if (GUILayout.Button("Revert")) bridge.RevertAsset(_selectedGuid);
+                    }
+                    if (GUILayout.Button("Excel")) bridge.OpenInExcel(_selectedGuid);
+                }
+            }
+            else
+            {
+                DrawTypedInspector(bridge, typed);
             }
             EditorGUILayout.EndScrollView();
         }
+    }
+
+    private ExcelDbSerializedInspectorSession? GetTypedInspector(IExcelDbUnityEditorBridge bridge)
+    {
+        if (_typedInspector != null
+            && ReferenceEquals(_typedInspector.Host, bridge)
+            && string.Equals(_typedInspector.Guid, _selectedGuid, StringComparison.Ordinal))
+            return _typedInspector;
+
+        DisposeTypedInspector();
+        _typedInspectorError = string.Empty;
+        if (!ExcelDbEditor.AssetDatabase.IsAuthoringEnabled)
+        {
+            _typedInspectorError =
+                "ExcelDB is read-only in the current runtime mode. Typed editing requires EditorAuthoring mode.";
+            return null;
+        }
+        _propertyFactory ??= new ExcelDbAuthoringPropertyFactory();
+        _propertyUndo ??= new ExcelDbUnityUndoBridge();
+        try
+        {
+            if (ExcelDbSerializedInspectorSession.TryCreate(
+                    bridge,
+                    _selectedGuid,
+                    _propertyFactory,
+                    _propertyUndo,
+                    out var session))
+                _typedInspector = session;
+        }
+        catch (Exception exception)
+        {
+            _typedInspectorError = exception.Message;
+        }
+        return _typedInspector;
+    }
+
+    private void DrawTypedInspector(
+        IExcelDbUnityEditorBridge bridge,
+        ExcelDbSerializedInspectorSession typed)
+    {
+        if (_typedInspectorError.Length != 0)
+            EditorGUILayout.HelpBox(_typedInspectorError, MessageType.Warning);
+        typed.SynchronizeBeforeDraw();
+        var apply = typed.LastApplyResult;
+        if (apply != null && apply.Status == ExcelDb.Editor.Model.EditorApplyStatus.RevisionConflict)
+        {
+            EditorGUILayout.HelpBox(
+                "This row changed outside the inspector. Reload it before applying staged values.",
+                MessageType.Warning);
+            if (GUILayout.Button("Reload external values"))
+                typed.RefreshFromResident();
+        }
+        else if (apply != null && apply.Status == ExcelDb.Editor.Model.EditorApplyStatus.StateConflict)
+        {
+            EditorGUILayout.HelpBox(
+                "Another inspector changed this resident row. Reload it before applying these staged values.",
+                MessageType.Warning);
+            if (GUILayout.Button("Reload resident values"))
+                typed.RefreshFromResident();
+        }
+
+        var captured = typed;
+        var changed = ExcelDbPropertyGUI.Draw(
+            typed.SerializedObject,
+            _propertyGuiState,
+            (property, value) =>
+            {
+                if (!ReferenceEquals(_typedInspector, captured))
+                    return;
+                captured.QueueReferenceChange(property, value);
+                Repaint();
+            });
+        if (changed)
+            typed.ApplyModifiedProperties("Edit ExcelDB property");
+
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            using (new EditorGUI.DisabledScope(!typed.CanUndo))
+            {
+                if (GUILayout.Button("Undo"))
+                    typed.PerformUndo();
+            }
+            using (new EditorGUI.DisabledScope(!typed.CanRedo))
+            {
+                if (GUILayout.Button("Redo"))
+                    typed.PerformRedo();
+            }
+        }
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            if (GUILayout.Button("Save"))
+            {
+                _typedInspectorError = typed.Save()
+                    ? string.Empty
+                    : "ExcelDB did not confirm a clean saved asset; the edit remains dirty.";
+            }
+            if (GUILayout.Button("Revert"))
+            {
+                typed.Revert();
+                _typedInspectorError = string.Empty;
+            }
+            if (GUILayout.Button("Excel"))
+                bridge.OpenInExcel(_selectedGuid);
+        }
+    }
+
+    private void DisposeTypedInspector()
+    {
+        _typedInspector?.Dispose();
+        _typedInspector = null;
+        _propertyGuiState.Clear();
     }
 
     private static void ShowWorkbookMenu(IExcelDbUnityEditorBridge bridge, string workbook)
@@ -405,7 +568,7 @@ internal sealed class ExcelDbPendingChangesWindow : EditorWindow
             using (new EditorGUILayout.HorizontalScope())
             {
                 if (GUILayout.Button("Save row")) bridge?.SavePending(item.Guid);
-                if (GUILayout.Button("Undo")) bridge?.RevertPending(item.Guid);
+                if (GUILayout.Button("Revert")) bridge?.RevertPending(item.Guid);
             }
             EditorGUILayout.Space();
         }
@@ -453,6 +616,19 @@ public static class ExcelDbRowReferencePicker
 {
     public static void Show(string refTable, string refGroup, Action<string> selected)
     {
+        if (selected == null)
+            throw new ArgumentNullException(nameof(selected));
+        ExcelDbRowReferencePickerWindow.Show(
+            refTable,
+            refGroup,
+            row => selected(row.Guid));
+    }
+
+    public static void Show(
+        string refTable,
+        string refGroup,
+        Action<UnityEditorBrowserRow> selected)
+    {
         ExcelDbRowReferencePickerWindow.Show(refTable, refGroup, selected);
     }
 }
@@ -460,6 +636,7 @@ public static class ExcelDbRowReferencePicker
 public static class ExcelDbRowReferenceDrag
 {
     public const string PayloadName = "ExcelDB.RowReference.Guid";
+    public const string RowPayloadName = "ExcelDB.RowReference.Row";
 
     public static string CurrentGuid
     {
@@ -468,6 +645,27 @@ public static class ExcelDbRowReferenceDrag
 
     public static bool HandleDrop(Rect dropArea, string ownerGuid, string propertyPath)
     {
+        return HandleDrop(
+            dropArea,
+            guid => ExcelDbUnityEditorBridge.Current?.AssignRowReference(ownerGuid, propertyPath, guid));
+    }
+
+    public static bool TryGetCurrentRow(out UnityEditorBrowserRow row)
+    {
+        var value = DragAndDrop.GetGenericData(RowPayloadName);
+        if (value is UnityEditorBrowserRow typed && typed.Guid.Length != 0 && typed.Table.Length != 0)
+        {
+            row = typed;
+            return true;
+        }
+        row = default;
+        return false;
+    }
+
+    public static bool HandleDrop(Rect dropArea, Action<string> accepted)
+    {
+        if (accepted == null)
+            throw new ArgumentNullException(nameof(accepted));
         var current = Event.current;
         if (!dropArea.Contains(current.mousePosition))
             return false;
@@ -483,7 +681,28 @@ public static class ExcelDbRowReferenceDrag
         if (current.type != EventType.DragPerform)
             return false;
         DragAndDrop.AcceptDrag();
-        ExcelDbUnityEditorBridge.Current?.AssignRowReference(ownerGuid, propertyPath, guid);
+        accepted(guid);
+        current.Use();
+        return true;
+    }
+
+    public static bool HandleDrop(Rect dropArea, Action<UnityEditorBrowserRow> accepted)
+    {
+        if (accepted == null)
+            throw new ArgumentNullException(nameof(accepted));
+        var current = Event.current;
+        if (!dropArea.Contains(current.mousePosition) || !TryGetCurrentRow(out var row))
+            return false;
+        if (current.type == EventType.DragUpdated)
+        {
+            DragAndDrop.visualMode = DragAndDropVisualMode.Link;
+            current.Use();
+            return false;
+        }
+        if (current.type != EventType.DragPerform)
+            return false;
+        DragAndDrop.AcceptDrag();
+        accepted(row);
         current.Use();
         return true;
     }
@@ -494,10 +713,13 @@ internal sealed class ExcelDbRowReferencePickerWindow : EditorWindow
     private string _refTable = string.Empty;
     private string _refGroup = string.Empty;
     private string _filter = string.Empty;
-    private Action<string>? _selected;
+    private Action<UnityEditorBrowserRow>? _selected;
     private Vector2 _scroll;
 
-    public static void Show(string refTable, string refGroup, Action<string> selected)
+    public static void Show(
+        string refTable,
+        string refGroup,
+        Action<UnityEditorBrowserRow> selected)
     {
         var window = CreateInstance<ExcelDbRowReferencePickerWindow>();
         window._refTable = refTable ?? string.Empty;
@@ -517,7 +739,7 @@ internal sealed class ExcelDbRowReferencePickerWindow : EditorWindow
         {
             if (GUILayout.Button(row.Table + "/" + row.Key + " — " + row.DisplayName))
             {
-                _selected?.Invoke(row.Guid);
+                _selected?.Invoke(row);
                 Close();
             }
         }
@@ -560,12 +782,48 @@ internal sealed class ExcelDbTextInputWindow : EditorWindow
 
 internal static class ExcelDbEditorLifecycle
 {
+    private static bool _reloadLocked;
+
+    internal static bool ReloadLocked
+    {
+        get { return _reloadLocked; }
+    }
+
     [InitializeOnLoadMethod]
     private static void Install()
     {
         EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+        EditorApplication.update += SynchronizeReloadLock;
+        CompilationPipeline.compilationStarted += OnCompilationStarted;
         AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
         EditorApplication.wantsToQuit += OnWantsToQuit;
+    }
+
+    private static void OnCompilationStarted(object context)
+    {
+        SynchronizeReloadLock();
+    }
+
+    internal static void SynchronizeReloadLock()
+    {
+        var bridge = ExcelDbUnityEditorBridge.Current;
+        var shouldLock = bridge != null
+                         && (bridge.BrowserCounts.Dirty != 0
+                             || bridge.PendingChanges.Count != 0
+                             || bridge.Conflicts.Count != 0);
+        if (shouldLock == _reloadLocked)
+            return;
+
+        if (shouldLock)
+        {
+            EditorApplication.LockReloadAssemblies();
+            _reloadLocked = true;
+        }
+        else
+        {
+            _reloadLocked = false;
+            EditorApplication.UnlockReloadAssemblies();
+        }
     }
 
     private static void OnPlayModeStateChanged(PlayModeStateChange state)
@@ -610,7 +868,16 @@ internal static class ExcelDbEditorLifecycle
 
     private static void OnBeforeAssemblyReload()
     {
-        ExcelDbUnityEditorBridge.Current?.GuardDirty("assembly-reload");
+        var bridge = ExcelDbUnityEditorBridge.Current;
+        if (bridge != null
+            && (bridge.BrowserCounts.Dirty != 0
+                || bridge.PendingChanges.Count != 0
+                || bridge.Conflicts.Count != 0))
+        {
+            throw new InvalidOperationException(
+                "ExcelDB assembly reload reached the final callback with pending authoring state. "
+                + "The proactive reload lock must remain held until the changes are saved or reverted.");
+        }
     }
 
     private static bool OnWantsToQuit()

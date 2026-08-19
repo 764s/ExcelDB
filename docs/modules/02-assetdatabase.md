@@ -191,7 +191,9 @@ AssetDatabase.SaveAssets();   // Δ3:以上全部至此才落盘(合并 → 补�
 ## 6. 保存、依赖、标签与打开
 
 - `SaveAssets` = P§6.5 事务全序(preflight 合并 → 写回计划 → 补丁写回 → 复读校验 → 原子替换 → 快照与 `__rev`);`SaveAssetIfDirty` 把写回计划收窄到单行(该行所在 workbook,仅该行 cell + metadata)。
-- 字段编辑与 dirty 语义(`SerializedObject`/`Undo`/`EditorUtility.SetDirty`)由 M6 拥有,样例仅示意闭环。
+- `EditorUtility.SetDirty` 只把 resident 变化纳入待保存事务，不隐式写 workbook；`SaveAssetIfDirty` 对 clean 资产是严格 no-op，不推进 `__rev`。`DiscardAssetChanges` 从最近一次成功导入/保存的独立深快照恢复，并清理该次影响闭包与排队中的单行保存。
+- 字段编辑与 dirty 语义(`EditorSerializedObject`/`EditorUndoHistory`/`EditorUtility.SetDirty`)由 M6 拥有；属性 Apply、Undo/Redo 与 Unity drawer 必须回到同一个 dirty/save/discard 生命周期，不能直接写 xlsx。
+- `GetAssetRevisionToken` 是编辑器桥使用的 opaque resident 发布令牌；成功导入、保存或放弃会更换令牌，即使外部 Excel 编辑没有推进 `__rev`，旧属性快照也不能覆盖新 resident。调用方不得解析或持久化该令牌。
 - `GetDependencies`:依赖 = 该行经 RowRef 引用的行(子表、单 cell、weighted 内的 RowRef 都归属父行);`recursive` 缺省 true 且结果含输入自身(同 Unity),false = 仅直接依赖、不含自身。UnityResourceRef/LocalizedTextRef 目标不是 ExcelDB 资产,不进结果(Δ7)。逆向查询 = `FindAssets("ref:…")`。
 - 标签:`GetLabels`/`SetLabels`/`ClearLabels` 读写 labels 字段(M1§2 `labels: true`,样例 schema 即 `common.tags`);Set/Clear 走正常 dirty/保存(P§4.7)。无 labels 字段的表:Get → 空数组,Set/Clear → error(Δ8:Unity 标签存 .meta,任意资产可用)。
 - `OpenAsset` 用系统关联程序打开所在 workbook(Excel),尽力定位 sheet 与行(adapter 实现,Δ10)。
@@ -250,6 +252,8 @@ namespace ExcelDbEditor;   // 资产实参 = SchemaRegistry 已注册的生成�
 
 public static class AssetDatabase
 {
+    public static bool IsAuthoringEnabled { get; }                         // EditorAuthoring only
+
     // ---- 挂载(Δ1:Unity 无 mount 概念,域 = 显式挂载集) ----
     public static void MountWorkbook(string path);
     public static void UnmountWorkbook(string path);                        // dirty 未保存 → 失败诊断
@@ -294,6 +298,11 @@ public static class AssetDatabase
     public static void SaveAssets();                                        // =U(P§6.5 事务)
     public static void SaveAssetIfDirty(object obj);                        // =U(单行粒度)
     public static void SaveAssetIfDirty(GUID guid);                         // =U
+    public static bool IsDirty(object obj);                                 // editor resident dirty
+    public static bool IsDirty(GUID guid);
+    public static string GetAssetRevisionToken(object obj);                 // opaque, editor bridge only
+    public static bool DiscardAssetChanges(object obj);
+    public static bool DiscardAssetChanges(GUID guid);
 
     // ---- 依赖与标签 ----
     public static string[] GetDependencies(string pathName);                // =U(recursive = true)Δ7

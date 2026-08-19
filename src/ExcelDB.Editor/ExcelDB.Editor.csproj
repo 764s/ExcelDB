@@ -12,6 +12,7 @@
   <ItemGroup>
     <ProjectReference Include="..\ExcelDB.Authoring\ExcelDB.Authoring.csproj" />
     <ProjectReference Include="..\ExcelDB.Core\ExcelDB.Core.csproj" />
+    <ProjectReference Include="..\ExcelDB.Editor.Model\ExcelDB.Editor.Model.csproj" />
     <ProjectReference Include="..\ExcelDB.Pipeline\ExcelDB.Pipeline.csproj" />
     <ProjectReference Include="..\ExcelDB.Runtime\ExcelDB.Runtime.csproj" />
     <ProjectReference Include="..\ExcelDB.Tooling\ExcelDB.Tooling.csproj" />

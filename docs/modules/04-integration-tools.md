@@ -202,6 +202,11 @@ C1/C3/C4/generate/normalize/data prepare/configure/repair 的领域写入共享 
 - Generate、Data Prepare、Check、Convert Client 调用同一服务；计划预览展示 plan hash、声明根、fingerprints、风险与 blocker。Unity 默认运行时 target 仍为 client，但不改变 CLI/Project 的开放 target 规则。
 - 报告窗口显示 target、实际 bytes/manifest 路径和可跳转诊断；Project 配置/系统镜像问题提供打开 Hub/配置/报告的入口。
 - Browser、dirty/冲突拦截、Play source picker 与 RuntimeDatabase 接线继续遵守 M2/M3/M6/M7，不把宿主状态写进 Project 配置。
+- 属性 Inspector 使用宿主无关的 `ExcelDB.Editor.Model`：`EditorSerializedObject` 持有 staged 深快照，`EditorSerializedProperty` 提供稳定 property path、mixed value、嵌套/list/RowRef 编辑。`GeneratedBindingFactory` 直接消费 codegen 的 table/field metadata，应用只负责把选中 GUID 映射到 resident 与对应 generated table；不得重写属性 diff、Undo 或 xlsx 写回。Apply 会同时校验 resident revision 与 observed value，任一目标冲突时整组零写并返回 `RevisionConflict`/`StateConflict`，成功后才统一进入 Authoring dirty。
+- 生成字段按“互不重叠的顶层 storage 快照 + schema property 投影”接入：嵌套与列表元素只投影元数据，不建立第二份 patch root；可空对象通过专用 presence 控件在 absent/present 间切换，首次编辑可显式物化，Undo/Redo 保留 presence 与字段值。当前 Map、`UnityResourceRef` 与 `LocalizedTextRef` 尚无完整的 entry/整值 drawer，因此 Inspector 必须将这些字段显示为带原因的只读 unsupported，不得把它们伪装成可编辑的普通对象；同一行的其他受支持字段仍可编辑。
+- Unity 原生 Undo 栈只保存一个隐藏 proxy 的 history generation/position；回放时由共享 `EditorUndoHistory` 绝对快照修改 resident，再统一 SetDirty。这样快捷键、Edit/Undo、工具栏 Undo/Redo 与跨行分组共享同一历史，不把 POCO 或 workbook bytes 塞进 Unity 序列化。
+- Unity 2022.3 包只加载 `netstandard2.1` 产物；Schema descriptor model、Workbooks、Authoring、Authoring.Workbooks 与 Editor.Model 使用同一 typed xlsx reader/writer/merge 实现，不启动子进程、不解析控制台文本、不另造 Unity 专用写入器。
+- dirty/conflict 存在期间 adapter 主动锁住 script assembly reload；保存、放弃或完成冲突处理后解锁。进入 Play 与退出宿主继续走可取消 guard，不能把 domain reload 当成成功保存。
 
 ### 7.2 CI
 

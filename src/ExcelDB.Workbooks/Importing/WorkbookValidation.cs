@@ -27,8 +27,8 @@ public sealed class WorkbookValidatorRegistry
         var builder = ImmutableDictionary.CreateBuilder<string, IWorkbookValidator>(StringComparer.Ordinal);
         foreach (var validator in validators ?? [])
         {
-            ArgumentNullException.ThrowIfNull(validator);
-            ArgumentException.ThrowIfNullOrWhiteSpace(validator.Id);
+            Guard.NotNull(validator);
+            Guard.NotNullOrWhiteSpace(validator.Id);
             if (!builder.TryAdd(validator.Id, validator))
                 throw new ArgumentException($"Duplicate workbook validator id '{validator.Id}'.", nameof(validators));
         }

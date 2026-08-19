@@ -73,7 +73,7 @@ public sealed class ProjectIdentityScanner(IRowGuidGenerator? generator = null)
         IEnumerable<WorkbookSource> sources,
         IEnumerable<KnownIdentity>? knownIdentities = null)
     {
-        ArgumentNullException.ThrowIfNull(sources);
+        Guard.NotNull(sources);
         var sourceArray = sources.ToArray();
         var known = (knownIdentities ?? []).ToArray();
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
@@ -299,7 +299,7 @@ public static class WorkbookRowHash
 {
     public static string Compute(int tableId, WorkbookRow row)
     {
-        ArgumentNullException.ThrowIfNull(row);
+        Guard.NotNull(row);
         var builder = new StringBuilder();
         Append(builder, tableId.ToString());
         Append(builder, row.Revision.ToString());
@@ -310,7 +310,7 @@ public static class WorkbookRowHash
             Append(builder, pair.Value.ComparisonText);
         }
 
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
+        return HashUtility.Sha256Upper(Encoding.UTF8.GetBytes(builder.ToString()))
             .ToLowerInvariant();
     }
 

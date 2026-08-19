@@ -132,7 +132,9 @@ Dirty/Conflicted --任何写回失败--> 原状态保留
 - 其他由系统自动产生且需要持久化的修复属于 dirty,必须出现在写回 plan 与报告中。
 - Clean workbook 可以单独提交 `DataPreparePlan` 并在成功后保持 Clean；存在业务 Dirty 时不得先做一笔独立身份写回改变 base,必须由 SaveAssets 把同一 `DataPreparePlan` 与业务 WritePlan 合成一次 workbook commit。
 - domain reload、进入 Play、退出宿主或卸载等会丢失内存态的转移,必须由宿主在状态消失前拦截;不得把状态清空当作成功保存。
-- “放弃/回滚”的精确基线、结构变化处理与崩溃恢复不在现有契约内,列入 §9。
+- 显式 Discard 以最近一次成功导入/保存的独立深快照为基线，恢复值、路径、key、workbook 与影响闭包；未保存的新建行直接移除。跨进程草稿与崩溃恢复仍按 §9 的边界处理。
+
+当前 facade 的首个安全落地对 dirty 期间的外部变化采用保守队列：`Refresh`/watcher 记录待导入并报告 `EXAD0004`，不立即覆盖 resident；成功 Save 先由 xlsx adapter 执行已有三方合并再排空队列，显式 Discard 则先恢复最近成功深快照再导入外部版本。立即在 Refresh 点形成字段级 `Merging` 仍需要 Import contract 暴露 canonical base/theirs/mine，本实现不通过伪调用 Save 或浅 POCO 合并冒充该能力。
 
 ## 5. 三方合并
 

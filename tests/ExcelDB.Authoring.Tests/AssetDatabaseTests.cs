@@ -222,6 +222,294 @@ public sealed class AssetDatabaseTests
     }
 
     [Fact]
+    public void SetDirtyStagesWithoutSavingAndDiscardRestoresThePersistedDeepSnapshot()
+    {
+        var skill = new Skill
+        {
+            Id = "fireball",
+            Labels = ["fire"],
+            ReferenceSlots = [new(default, AuthoringReferenceDeletePolicy.SetNull, "original")],
+        };
+        var adapter = new MemoryAdapter([Import("Data/game.xlsx", skill)]);
+        using var session = CreateSession(adapter);
+        using var activation = session.Activate();
+        AssetDatabase.MountWorkbook("Data/game.xlsx");
+
+        skill.Labels[0] = "edited";
+        skill.ReferenceSlots[0].Token = "edited-token";
+        EditorUtility.SetDirty(skill);
+
+        Assert.True(EditorUtility.IsDirty(skill));
+        Assert.True(AssetDatabase.IsDirty(skill));
+        Assert.True(session.IsDirty);
+        Assert.Empty(adapter.Saves);
+
+        Assert.True(AssetDatabase.DiscardAssetChanges(skill));
+
+        Assert.Equal(["fire"], skill.Labels);
+        Assert.Equal("original", skill.ReferenceSlots[0].Token);
+        Assert.False(EditorUtility.IsDirty(skill));
+        Assert.False(session.IsDirty);
+        Assert.Empty(adapter.Saves);
+
+        skill.Labels[0] = "second-edit";
+        skill.ReferenceSlots[0].Token = "second-token";
+        EditorUtility.SetDirty(skill);
+        Assert.True(AssetDatabase.DiscardAssetChanges(skill));
+
+        Assert.Equal(["fire"], skill.Labels);
+        Assert.Equal("original", skill.ReferenceSlots[0].Token);
+    }
+
+    [Fact]
+    public void SaveAssetIfDirtyIsANoOpForCleanAssetsAndDoesNotAdvanceRevision()
+    {
+        var guid = new GUID(RowGuid.New());
+        var skill = new Skill { Id = "fireball", Labels = ["fire"] };
+        var import = new AuthoringWorkbookImport(
+            "Data/game.xlsx",
+            [new(guid, "Skill", skill.Id, skill, Revision: 7)],
+            Ok("import"),
+            "v1");
+        var adapter = new MemoryAdapter([import]);
+        using var session = CreateSession(adapter);
+        using var activation = session.Activate();
+        AssetDatabase.MountWorkbook("Data/game.xlsx");
+        var cleanRevisionToken = AssetDatabase.GetAssetRevisionToken(skill);
+
+        AssetDatabase.SaveAssetIfDirty(skill);
+        AssetDatabase.SaveAssetIfDirty(guid);
+
+        Assert.Empty(adapter.Saves);
+        Assert.False(AssetDatabase.IsDirty(skill));
+        Assert.False(session.IsDirty);
+        Assert.Equal(cleanRevisionToken, AssetDatabase.GetAssetRevisionToken(skill));
+
+        skill.Labels[0] = "edited";
+        EditorUtility.SetDirty(skill);
+        AssetDatabase.SaveAssetIfDirty(guid);
+
+        var item = Assert.Single(Assert.Single(adapter.Saves).Items);
+        Assert.Equal((uint)7, item.Revision);
+        Assert.False(session.IsDirty);
+    }
+
+    [Fact]
+    public void EditorRevisionTokenChangesWhenImportSaveOrDiscardPublishesANewBaseline()
+    {
+        var guid = new GUID(RowGuid.New());
+        var resident = new Skill { Id = "fireball", Labels = ["initial"] };
+        var adapter = new MemoryAdapter([new AuthoringWorkbookImport(
+            "Data/game.xlsx",
+            [new(guid, "Skill", resident.Id, resident, Revision: 7)],
+            Ok("import"),
+            "v1")]);
+        using var session = CreateSession(adapter);
+        using var activation = session.Activate();
+        AssetDatabase.MountWorkbook("Data/game.xlsx");
+        var mountedToken = AssetDatabase.GetAssetRevisionToken(resident);
+
+        adapter.SetImport(new AuthoringWorkbookImport(
+            "Data/game.xlsx",
+            [new(guid, "Skill", resident.Id, new Skill { Id = "fireball", Labels = ["external"] }, Revision: 7)],
+            Ok("import"),
+            "v2"));
+        AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
+        var importedToken = AssetDatabase.GetAssetRevisionToken(resident);
+
+        Assert.NotEqual(mountedToken, importedToken);
+        Assert.Equal(["external"], resident.Labels);
+
+        resident.Labels[0] = "saved";
+        EditorUtility.SetDirty(resident);
+        AssetDatabase.SaveAssetIfDirty(resident);
+        var savedToken = AssetDatabase.GetAssetRevisionToken(resident);
+
+        Assert.NotEqual(importedToken, savedToken);
+
+        resident.Labels[0] = "discarded";
+        EditorUtility.SetDirty(resident);
+        Assert.True(AssetDatabase.DiscardAssetChanges(resident));
+        var discardedToken = AssetDatabase.GetAssetRevisionToken(resident);
+
+        Assert.NotEqual(savedToken, discardedToken);
+        Assert.Equal(["saved"], resident.Labels);
+    }
+
+    [Fact]
+    public void SuccessfulSaveMovesTheDiscardBaselineForward()
+    {
+        var skill = new Skill { Id = "fireball", Labels = ["fire"] };
+        var adapter = new MemoryAdapter([Import("Data/game.xlsx", skill)]);
+        using var session = CreateSession(adapter);
+        using var activation = session.Activate();
+        AssetDatabase.MountWorkbook("Data/game.xlsx");
+
+        skill.Labels[0] = "saved";
+        EditorUtility.SetDirty(skill);
+        AssetDatabase.SaveAssets();
+        Assert.Single(adapter.Saves);
+        Assert.False(EditorUtility.IsDirty(skill));
+
+        skill.Labels[0] = "draft";
+        EditorUtility.SetDirty(skill);
+        Assert.True(AssetDatabase.DiscardAssetChanges(skill));
+
+        Assert.Equal(["saved"], skill.Labels);
+        Assert.False(EditorUtility.IsDirty(skill));
+        Assert.Single(adapter.Saves);
+    }
+
+    [Fact]
+    public void FailedSaveKeepsDirtyRevisionAndPersistedDiscardBaseline()
+    {
+        var guid = new GUID(RowGuid.New());
+        var skill = new Skill { Id = "fireball", Labels = ["fire"] };
+        var import = new AuthoringWorkbookImport(
+            "Data/game.xlsx",
+            [new(guid, "Skill", skill.Id, skill, Revision: 4)],
+            Ok("import"),
+            "v1");
+        var adapter = new MemoryAdapter([import])
+        {
+            SaveResult = new OperationReport(
+                "save",
+                "test",
+                false,
+                [new Diagnostic("TEST0001", DiagnosticSeverity.Blocker, ".", "simulated failure")],
+                []),
+        };
+        using var session = CreateSession(adapter);
+        using var activation = session.Activate();
+        AssetDatabase.MountWorkbook("Data/game.xlsx");
+        var baselineRevisionToken = AssetDatabase.GetAssetRevisionToken(skill);
+
+        skill.Labels[0] = "failed-draft";
+        EditorUtility.SetDirty(skill);
+        AssetDatabase.SaveAssetIfDirty(skill);
+
+        Assert.True(AssetDatabase.IsDirty(skill));
+        Assert.True(session.IsDirty);
+        Assert.Equal((uint)4, Assert.Single(Assert.Single(adapter.Saves).Items).Revision);
+        Assert.Equal(baselineRevisionToken, AssetDatabase.GetAssetRevisionToken(skill));
+
+        Assert.True(AssetDatabase.DiscardAssetChanges(skill));
+        Assert.Equal(["fire"], skill.Labels);
+        Assert.False(session.IsDirty);
+        Assert.NotEqual(baselineRevisionToken, AssetDatabase.GetAssetRevisionToken(skill));
+    }
+
+    [Fact]
+    public void CloneContractRejectsAResidentInstanceAsItsOwnPersistedBaseline()
+    {
+        var skill = new Skill { Id = "fireball" };
+        var adapter = new MemoryAdapter([Import("Data/game.xlsx", skill)]);
+        using var session = new AssetDatabaseSession(adapter).RegisterTable(new AuthoringTableRegistration(
+            101,
+            "Skill",
+            typeof(Skill),
+            static value => ((Skill)value).Id,
+            static (value, key) => ((Skill)value).Id = key,
+            static value => value));
+        using var activation = session.Activate();
+
+        var exception = Assert.Throws<InvalidOperationException>(() => AssetDatabase.MountWorkbook("Data/game.xlsx"));
+
+        Assert.Contains("independent deep clone", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DirtyRefreshRemainsDeferredInsteadOfOverwritingTheResidentDraft()
+    {
+        var guid = new GUID(RowGuid.New());
+        var skill = new Skill { Id = "fireball", Labels = ["fire"] };
+        var adapter = new MemoryAdapter([Import("Data/game.xlsx", (guid, skill))]);
+        using var session = CreateSession(adapter, enableExcel: true);
+        using var activation = session.Activate();
+        AssetDatabase.MountWorkbook("Data/game.xlsx");
+        var importsAfterMount = adapter.ImportCount;
+
+        skill.Labels[0] = "resident-draft";
+        EditorUtility.SetDirty(skill);
+        adapter.SetImport(Import(
+            "Data/game.xlsx",
+            (guid, new Skill { Id = "fireball", Labels = ["external"] })));
+        AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
+
+        Assert.Equal("resident-draft", skill.Labels[0]);
+        Assert.True(AssetDatabase.IsDirty(skill));
+        Assert.Equal(importsAfterMount, adapter.ImportCount);
+        Assert.Contains(session.Diagnostics, static item => item.Diagnostic.Code == "EXAD0004");
+
+        Assert.True(AssetDatabase.DiscardAssetChanges(skill));
+
+        Assert.Equal("external", skill.Labels[0]);
+        Assert.False(AssetDatabase.IsDirty(skill));
+        Assert.Equal(importsAfterMount + 1, adapter.ImportCount);
+    }
+
+    [Fact]
+    public void DiscardingAMoveRestoresItsWorkbookKeyAndReferenceImpactClosure()
+    {
+        var targetGuid = new GUID(RowGuid.New());
+        var ownerGuid = new GUID(RowGuid.New());
+        var target = new Skill { Id = "target" };
+        var owner = new Skill
+        {
+            Id = "owner",
+            ReferenceSlots = [new(targetGuid, AuthoringReferenceDeletePolicy.Block, "Data/game.xlsx/Skill/target")],
+        };
+        var adapter = new MemoryAdapter([
+            Import("Data/game.xlsx", (targetGuid, target)),
+            Import("Data/dlc.xlsx", (ownerGuid, owner))]);
+        using var session = CreateSession(adapter);
+        using var activation = session.Activate();
+        AssetDatabase.MountWorkbook("Data/game.xlsx");
+        AssetDatabase.MountWorkbook("Data/dlc.xlsx");
+
+        Assert.Equal(
+            string.Empty,
+            AssetDatabase.MoveAsset("Data/game.xlsx/Skill/target", "Data/dlc.xlsx/Skill/renamed"));
+        Assert.Equal("Data/dlc.xlsx/Skill/renamed", owner.ReferenceSlots[0].Token);
+
+        Assert.True(AssetDatabase.DiscardAssetChanges(targetGuid));
+
+        Assert.Same(target, AssetDatabase.LoadAssetAtPath<Skill>("Data/game.xlsx/Skill/target"));
+        Assert.Null(AssetDatabase.LoadAssetAtPath<Skill>("Data/dlc.xlsx/Skill/renamed"));
+        Assert.Equal("target", target.Id);
+        Assert.Equal("Data/game.xlsx/Skill/target", owner.ReferenceSlots[0].Token);
+        Assert.False(AssetDatabase.IsDirty(targetGuid));
+        Assert.False(AssetDatabase.IsDirty(ownerGuid));
+        Assert.False(session.IsDirty);
+        Assert.Empty(adapter.Saves);
+        Assert.Empty(adapter.TransactionSaves);
+    }
+
+    [Fact]
+    public void DiscardingAnUnsavedCreatedAssetRemovesItWithoutWriting()
+    {
+        var adapter = new MemoryAdapter([EmptyImport("Data/game.xlsx")]);
+        using var session = CreateSession(adapter);
+        using var activation = session.Activate();
+        AssetDatabase.MountWorkbook("Data/game.xlsx");
+        var skill = new Skill();
+
+        AssetDatabase.StartAssetEditing();
+        AssetDatabase.CreateAsset(skill, "Data/game.xlsx/Skill/draft");
+        var guid = AssetDatabase.GUIDFromAssetPath("Data/game.xlsx/Skill/draft");
+        Assert.True(AssetDatabase.IsDirty(guid));
+        AssetDatabase.SaveAssetIfDirty(guid);
+
+        Assert.True(AssetDatabase.DiscardAssetChanges(guid));
+        AssetDatabase.StopAssetEditing();
+
+        Assert.False(AssetDatabase.Contains(skill));
+        Assert.Null(AssetDatabase.LoadAssetAtPath<Skill>("Data/game.xlsx/Skill/draft"));
+        Assert.False(session.IsDirty);
+        Assert.Empty(adapter.Saves);
+    }
+
+    [Fact]
     public void WatcherRaisedByImportEventQueuesTheNextOwnerPublishPoint()
     {
         var adapter = new MemoryAdapter([EmptyImport("Data/game.xlsx")]);
@@ -247,10 +535,14 @@ public sealed class AssetDatabaseTests
         var adapter = new MemoryAdapter([EmptyImport("Data/game.xlsx")]);
         using (var release = new AssetDatabaseSession(adapter, RuntimeMode.Release))
         using (release.Activate())
+        {
+            Assert.False(AssetDatabase.IsAuthoringEnabled);
             Assert.Throws<InvalidOperationException>(() => AssetDatabase.MountWorkbook("Data/game.xlsx"));
+        }
 
         using var development = CreateSession(adapter, RuntimeMode.Development, enableExcel: true);
         using var activation = development.Activate();
+        Assert.False(AssetDatabase.IsAuthoringEnabled);
         AssetDatabase.MountWorkbook("Data/game.xlsx");
         Assert.Throws<InvalidOperationException>(() => AssetDatabase.CreateAsset(new Skill(), "Data/game.xlsx/Skill/x"));
         Assert.Throws<InvalidOperationException>(() => development.NotifyWorkbookChanged("Data/game.xlsx"));
@@ -386,13 +678,15 @@ public sealed class AssetDatabaseTests
         private readonly Dictionary<string, AuthoringWorkbookImport> _imports = imports.ToDictionary(static item => item.WorkbookPath, StringComparer.Ordinal);
         public List<AuthoringSaveRequest> Saves { get; } = [];
         public List<ImmutableArray<AuthoringSaveRequest>> TransactionSaves { get; } = [];
+        public OperationReport? SaveResult { get; set; }
         public int ImportCount { get; private set; }
+        public void SetImport(AuthoringWorkbookImport import) => _imports[import.WorkbookPath] = import;
         public AuthoringWorkbookImport Import(string workbookPath, bool forceUpdate)
         {
             ImportCount++;
             return _imports.TryGetValue(workbookPath, out var value) ? value : EmptyImport(workbookPath);
         }
-        public OperationReport Save(AuthoringSaveRequest request) { Saves.Add(request); return Ok("save"); }
+        public OperationReport Save(AuthoringSaveRequest request) { Saves.Add(request); return SaveResult ?? Ok("save"); }
         public OperationReport Save(ImmutableArray<AuthoringSaveRequest> requests)
         {
             TransactionSaves.Add(requests);

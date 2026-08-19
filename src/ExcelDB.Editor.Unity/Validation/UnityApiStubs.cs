@@ -1,10 +1,23 @@
 #if EXCELDB_DOTNET_VALIDATE
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 
 namespace UnityEngine
 {
-public class Object { }
-public class ScriptableObject : Object { }
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class SerializeField : Attribute { }
+public enum HideFlags { None = 0, HideAndDontSave = 61 }
+public class Object
+{
+    public HideFlags hideFlags { get; set; }
+    public static void DestroyImmediate(Object target) { }
+}
+public class ScriptableObject : Object
+{
+    public static T CreateInstance<T>() where T : ScriptableObject, new() { return new T(); }
+}
 public sealed class DefaultAsset : Object { }
 public struct Vector2 { }
 public struct Rect
@@ -26,6 +39,7 @@ public static class GUI
 {
     public static GUISkin skin { get; } = new GUISkin();
     public static bool enabled { get; set; }
+    public static bool changed { get; set; }
 }
 public static class GUILayout
 {
@@ -36,6 +50,7 @@ public static class GUILayout
     public static void Label(string text, params GUILayoutOption[] options) { }
     public static void Label(string text, GUIStyle style, params GUILayoutOption[] options) { }
     public static void Space(float pixels) { }
+    public static void FlexibleSpace() { }
     public static GUILayoutOption Width(float value) { return new GUILayoutOption(); }
     public static GUILayoutOption MinWidth(float value) { return new GUILayoutOption(); }
     public static GUILayoutOption Height(float value) { return new GUILayoutOption(); }
@@ -52,6 +67,10 @@ public sealed class Event
     public Vector2 mousePosition { get; set; }
     public int clickCount { get; set; }
     public void Use() { }
+}
+public static class Debug
+{
+    public static void LogError(object message) { }
 }
 }
 
@@ -84,7 +103,7 @@ public class EditorWindow : ScriptableObject
     public Rect position { get; set; }
     public GUIContent titleContent { get; set; } = new GUIContent(string.Empty);
     public static T GetWindow<T>(string title) where T : EditorWindow, new() { return new T(); }
-    public static T CreateInstance<T>() where T : EditorWindow, new() { return new T(); }
+    public new static T CreateInstance<T>() where T : EditorWindow, new() { return new T(); }
     public void ShowAuxWindow() { }
     public void Repaint() { }
     public void Close() { }
@@ -109,6 +128,28 @@ public static class EditorStyles
 
 public static class EditorGUILayout
 {
+    public static string? LastHelpBoxMessage { get; private set; }
+    public static MessageType LastHelpBoxType { get; private set; }
+    public static string? LastLabel { get; private set; }
+    public static string? LastLabelValue { get; private set; }
+    public static string? LastToggleLabel { get; private set; }
+    public static bool LastToggleValue { get; private set; }
+    public static bool LastToggleHadMixedValue { get; private set; }
+    public static bool? NextToggleValue { get; set; }
+
+    public static void ResetValidationState()
+    {
+        LastHelpBoxMessage = null;
+        LastHelpBoxType = MessageType.None;
+        LastLabel = null;
+        LastLabelValue = null;
+        LastToggleLabel = null;
+        LastToggleValue = false;
+        LastToggleHadMixedValue = false;
+        NextToggleValue = null;
+        EditorGUI.NextChangeCheckResult = false;
+    }
+
     public sealed class HorizontalScope : IDisposable
     {
         public HorizontalScope(params GUILayoutOption[] options) { }
@@ -121,12 +162,39 @@ public static class EditorGUILayout
         public VerticalScope(GUIStyle style, params GUILayoutOption[] options) { }
         public void Dispose() { }
     }
-    public static void HelpBox(string message, MessageType type) { }
-    public static void LabelField(string label, params GUILayoutOption[] options) { }
-    public static void LabelField(string label, string value, params GUILayoutOption[] options) { }
+    public static void HelpBox(string message, MessageType type)
+    {
+        LastHelpBoxMessage = message;
+        LastHelpBoxType = type;
+    }
+    public static void LabelField(string label, params GUILayoutOption[] options)
+    {
+        LastLabel = label;
+        LastLabelValue = null;
+    }
+    public static void LabelField(string label, string value, params GUILayoutOption[] options)
+    {
+        LastLabel = label;
+        LastLabelValue = value;
+    }
     public static void LabelField(string label, GUIStyle style, params GUILayoutOption[] options) { }
     public static string TextField(string label, string text) { return text; }
-    public static bool Toggle(string label, bool value) { return value; }
+    public static int IntField(string label, int value) { return value; }
+    public static long LongField(string label, long value) { return value; }
+    public static float FloatField(string label, float value) { return value; }
+    public static double DoubleField(string label, double value) { return value; }
+    public static int DelayedIntField(string label, int value) { return value; }
+    public static int Popup(string label, int selectedIndex, string[] displayedOptions) { return selectedIndex; }
+    public static bool Foldout(bool foldout, string content, bool toggleOnLabelClick = false) { return foldout; }
+    public static bool Toggle(string label, bool value)
+    {
+        LastToggleLabel = label;
+        LastToggleHadMixedValue = EditorGUI.showMixedValue;
+        var result = NextToggleValue ?? value;
+        NextToggleValue = null;
+        LastToggleValue = result;
+        return result;
+    }
     public static Vector2 BeginScrollView(Vector2 scrollPosition) { return scrollPosition; }
     public static void EndScrollView() { }
     public static void SelectableLabel(string text, params GUILayoutOption[] options) { }
@@ -140,8 +208,16 @@ public static class EditorGUI
         public DisabledScope(bool disabled) { }
         public void Dispose() { }
     }
+    public static bool showMixedValue { get; set; }
+    public static int indentLevel { get; set; }
+    public static bool NextChangeCheckResult { get; set; }
     public static void BeginChangeCheck() { }
-    public static bool EndChangeCheck() { return false; }
+    public static bool EndChangeCheck()
+    {
+        var result = NextChangeCheckResult;
+        NextChangeCheckResult = false;
+        return result;
+    }
 }
 public static class EditorGUIUtility
 {
@@ -167,6 +243,108 @@ public static class EditorUtility
     public static bool DisplayDialog(string title, string message, string ok, string cancel = "") { return false; }
     public static int DisplayDialogComplex(string title, string message, string ok, string cancel, string alternate) { return 2; }
     public static string SaveFilePanel(string title, string directory, string defaultName, string extension) { return string.Empty; }
+    public static void SetDirty(Object target) { }
+}
+public static class Undo
+{
+    private sealed class NativeRecord
+    {
+        public NativeRecord(Object target, FieldValue[] before, FieldValue[] after)
+        {
+            Target = target;
+            Before = before;
+            After = after;
+        }
+
+        public Object Target { get; }
+        public FieldValue[] Before { get; }
+        public FieldValue[] After { get; }
+    }
+
+    private readonly struct FieldValue
+    {
+        public FieldValue(FieldInfo field, object? value)
+        {
+            Field = field;
+            Value = value;
+        }
+
+        public FieldInfo Field { get; }
+        public object? Value { get; }
+    }
+
+    private static readonly List<NativeRecord> UndoRecords = new List<NativeRecord>();
+    private static readonly List<NativeRecord> RedoRecords = new List<NativeRecord>();
+    private static Object? _pendingTarget;
+    private static FieldValue[]? _pendingBefore;
+
+    public static event Action? undoRedoPerformed;
+    public static int GetCurrentGroup() { return 0; }
+    public static void IncrementCurrentGroup() { }
+    public static void SetCurrentGroupName(string name) { }
+    public static void RecordObject(Object target, string name)
+    {
+        _pendingTarget = target;
+        _pendingBefore = Capture(target);
+    }
+    public static void RegisterCompleteObjectUndo(Object target, string name) { RecordObject(target, name); }
+    public static void CollapseUndoOperations(int groupIndex) { }
+    public static void FlushUndoRecordObjects()
+    {
+        if (_pendingTarget == null || _pendingBefore == null)
+            return;
+        UndoRecords.Add(new NativeRecord(_pendingTarget, _pendingBefore, Capture(_pendingTarget)));
+        RedoRecords.Clear();
+        _pendingTarget = null;
+        _pendingBefore = null;
+    }
+    public static void PerformUndo()
+    {
+        if (UndoRecords.Count == 0)
+            return;
+        var index = UndoRecords.Count - 1;
+        var record = UndoRecords[index];
+        UndoRecords.RemoveAt(index);
+        Restore(record.Target, record.Before);
+        RedoRecords.Add(record);
+        undoRedoPerformed?.Invoke();
+    }
+    public static void PerformRedo()
+    {
+        if (RedoRecords.Count == 0)
+            return;
+        var index = RedoRecords.Count - 1;
+        var record = RedoRecords[index];
+        RedoRecords.RemoveAt(index);
+        Restore(record.Target, record.After);
+        UndoRecords.Add(record);
+        undoRedoPerformed?.Invoke();
+    }
+    public static void ClearUndo(Object target)
+    {
+        UndoRecords.RemoveAll(record => ReferenceEquals(record.Target, target));
+        RedoRecords.RemoveAll(record => ReferenceEquals(record.Target, target));
+        if (ReferenceEquals(_pendingTarget, target))
+        {
+            _pendingTarget = null;
+            _pendingBefore = null;
+        }
+    }
+
+    private static FieldValue[] Capture(Object target)
+    {
+        return target.GetType()
+            .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Where(static field => !field.IsStatic)
+            .Select(field => new FieldValue(field, field.GetValue(target)))
+            .ToArray();
+    }
+
+    private static void Restore(Object target, IEnumerable<FieldValue> values)
+    {
+        foreach (var value in values)
+            value.Field.SetValue(target, value.Value);
+    }
 }
 public sealed class GenericMenu
 {
@@ -187,13 +365,26 @@ public static class DragAndDrop
 public enum DragAndDropVisualMode { None, Link }
 public static class EditorApplication
 {
+    public static event Action update { add { } remove { } }
     public static event Action<PlayModeStateChange> playModeStateChanged { add { } remove { } }
     public static event Func<bool> wantsToQuit { add { } remove { } }
     public static bool isPlaying { get; set; }
+    public static void LockReloadAssemblies() { }
+    public static void UnlockReloadAssemblies() { }
 }
 public static class AssemblyReloadEvents
 {
     public static event Action beforeAssemblyReload { add { } remove { } }
+}
+}
+
+namespace UnityEditor.Compilation
+{
+using System;
+
+public static class CompilationPipeline
+{
+    public static event Action<object> compilationStarted { add { } remove { } }
 }
 }
 #endif

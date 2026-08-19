@@ -82,8 +82,10 @@ public sealed class XlsxAuthoringWorkbookAdapterTests
 
         asset.Count = 12;
         asset.Note = "saved";
+        EditorUtility.SetDirty(asset);
         AssetDatabase.SaveAssetIfDirty(asset);
         asset.Count = 13;
+        EditorUtility.SetDirty(asset);
         AssetDatabase.SaveAssetIfDirty(asset);
 
         Assert.DoesNotContain(session.Diagnostics, diagnostic => diagnostic.Diagnostic.IsFailure);
@@ -114,6 +116,7 @@ public sealed class XlsxAuthoringWorkbookAdapterTests
             [new CellPatch("Items", 4, 2, new ExcelDb.Workbooks.Model.WorkbookCell("9"))]);
         File.WriteAllBytes(path, external);
 
+        EditorUtility.SetDirty(asset);
         AssetDatabase.SaveAssetIfDirty(asset);
 
         Assert.DoesNotContain(session.Diagnostics, diagnostic => diagnostic.Diagnostic.IsFailure);
@@ -144,6 +147,7 @@ public sealed class XlsxAuthoringWorkbookAdapterTests
             [new CellPatch("Items", 4, 3, new ExcelDb.Workbooks.Model.WorkbookCell("theirs"))]);
         File.WriteAllBytes(path, external);
 
+        EditorUtility.SetDirty(asset);
         AssetDatabase.SaveAssetIfDirty(asset);
 
         Assert.Contains(session.Diagnostics, diagnostic => diagnostic.Diagnostic.Code == "EXAW0102");
@@ -178,6 +182,7 @@ public sealed class XlsxAuthoringWorkbookAdapterTests
                 original,
                 [new CellPatch("Items", 4, 3, new ExcelDb.Workbooks.Model.WorkbookCell("theirs"))]));
 
+        EditorUtility.SetDirty(asset);
         AssetDatabase.SaveAssetIfDirty(asset);
         var conflicts = new ConflictRecord[1];
         Assert.Equal(ExcelDb.Runtime.RuntimeQueryStatus.Success, AssetDatabase.GetConflicts(conflicts, out var count));
@@ -210,6 +215,7 @@ public sealed class XlsxAuthoringWorkbookAdapterTests
         Assert.Equal((uint)0, first.Revision);
 
         created.Count = 3;
+        EditorUtility.SetDirty(created);
         AssetDatabase.SaveAssetIfDirty(created);
 
         Assert.DoesNotContain(session.Diagnostics, diagnostic => diagnostic.Diagnostic.IsFailure);

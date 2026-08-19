@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ExcelDB.Authoring.Workbooks\ExcelDB.Authoring.Workbooks.csproj" />
+    <ProjectReference Include="..\..\src\ExcelDB.Schema.Model\ExcelDB.Schema.Model.csproj" />
   </ItemGroup>
 
 </Project>

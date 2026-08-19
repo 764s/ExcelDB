@@ -11,7 +11,7 @@ public static class WorkbookImportDomain
     public static ImmutableArray<Diagnostic> Validate(
         IEnumerable<WorkbookImportDomainEntry> entries)
     {
-        ArgumentNullException.ThrowIfNull(entries);
+        Guard.NotNull(entries);
         var rows = entries
             .SelectMany(entry => entry.Import.Rows.Select(row => (entry.WorkbookPath, Row: row)))
             .ToArray();
@@ -26,7 +26,7 @@ public static class WorkbookImportDomain
         {
             var locations = group
                 .Select(static item => $"{item.WorkbookPath}:{item.Row.Location}")
-                .Order(StringComparer.Ordinal)
+            .OrderBy(static entry => entry, StringComparer.Ordinal)
                 .ToArray();
             diagnostics.Add(new Diagnostic(
                 "EXWB2022",

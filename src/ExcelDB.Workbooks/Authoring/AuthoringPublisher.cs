@@ -41,8 +41,8 @@ public sealed class AuthoringPublisher
 
     public void Publish(WorkbookImportResult import, OperationReport report)
     {
-        ArgumentNullException.ThrowIfNull(import);
-        ArgumentNullException.ThrowIfNull(report);
+        Guard.NotNull(import);
+        Guard.NotNull(report);
         if (_publishing)
             throw new InvalidOperationException("Authoring publication is not reentrant.");
         _publishing = true;
