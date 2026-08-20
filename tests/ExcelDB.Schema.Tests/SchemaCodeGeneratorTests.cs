@@ -21,6 +21,11 @@ public sealed class SchemaCodeGeneratorTests
               string label = 1;
             }
 
+            message Effect {
+              string kind = 1;
+              int32 amount = 2;
+            }
+
             message Item {
               option (exceldb.table) = { kind: ASSET, id: 78, implements: "loot" };
               string id = 1 [(exceldb.field) = { key: 1 }];
@@ -36,6 +41,7 @@ public sealed class SchemaCodeGeneratorTests
               exceldb.RowRef grouped_item = 6 [(exceldb.field) = { ref_group: "loot" }];
               repeated int32 levels = 7;
               Details details = 8 [(exceldb.field) = { expand: EXPANDED_COLUMNS }];
+              repeated Effect effects = 9 [(exceldb.field) = { child_table: { sheet_name: "ConfigEffects" } }];
             }
             """);
         var compilation = await new SchemaCompiler().CompileAsync(schema.Path);
@@ -91,6 +97,18 @@ public sealed class SchemaCodeGeneratorTests
         Assert.Contains("CaptureRollback_77", client.Content, StringComparison.Ordinal);
         Assert.Contains("RollbackState_77", client.Content, StringComparison.Ordinal);
         Assert.DoesNotContain("new object?[]", client.Content, StringComparison.Ordinal);
+        Assert.Contains(
+            "instance.Effects = RuntimeGeneratedValueCodec.Parse<List<Effect>>(field.Data.Span);",
+            client.Content,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "instance.Effects.Kind =",
+            client.Content,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "instance.Effects.Amount =",
+            client.Content,
+            StringComparison.Ordinal);
 
         var clientRegistry = Assert.Single(first.Artifacts, artifact =>
             artifact.Kind == "runtime-registry-csharp" && artifact.ExportTarget == "client");

@@ -585,6 +585,7 @@ public sealed class SchemaCodeGenerator
                 .ToArray();
             var runtimeFields = Flatten(table.Fields)
                 .Where(field => field.ExportTargets.Contains(target, StringComparer.Ordinal))
+                .Where(field => IsRuntimeRecordField(table, field))
                 .OrderBy(static field => string.Join(".", field.FieldIdPath), StringComparer.Ordinal)
                 .ToArray();
             var members = BuildMemberNames(table.Fields);
@@ -760,6 +761,19 @@ public sealed class SchemaCodeGenerator
         return result.ToImmutable();
     }
 
+    private static bool IsRuntimeRecordField(
+        CanonicalTableDescriptor table,
+        CanonicalFieldDescriptor field)
+    {
+        var chain = ResolveFieldChain(table, field);
+        // Child-table rows are aggregated into one canonical JSON value at the
+        // owner field before conversion. RuntimeAssetRecord therefore contains
+        // the repeated/map owner path, never its worksheet-only descendant
+        // columns. Expanded singular messages are different: their descendant
+        // paths are physical runtime fields and must remain assignable.
+        return chain.Length == 1 || chain[0].ChildTable is null;
+    }
+
     private static Dictionary<string, ShapeDefinition> CollectDefinitions(
         CanonicalSchemaDescriptor descriptor,
         string? target)
@@ -882,8 +896,6 @@ public sealed class SchemaCodeGenerator
         CanonicalFieldDescriptor field,
         IReadOnlyDictionary<string, string> typeNames)
     {
-        if (field.HasPresence && field.Map is null)
-            return string.Empty;
         if (field.Map is not null
             || field.Shape is CanonicalFieldShape.RepeatedScalar
                 or CanonicalFieldShape.RepeatedEnum
@@ -891,6 +903,9 @@ public sealed class SchemaCodeGenerator
         {
             return " = new();";
         }
+
+        if (field.HasPresence)
+            return string.Empty;
 
         return field.TypeName switch
         {
