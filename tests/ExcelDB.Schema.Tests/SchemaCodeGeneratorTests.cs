@@ -313,7 +313,7 @@ public sealed class SchemaCodeGeneratorTests
                         var itemTable = schema.Tables.Single(static table => table.Name == "Item");
                         var rowGuid = ExcelDb.Core.Identity.RowGuid.Parse("00000000000000000000000000000101");
                         var dependencyGuid = Guid.ParseExact("00000000000000000000000000000102", "N");
-                        var dependencyToken = "78:" + dependencyGuid.ToString("N");
+                        var dependencyToken = "78:sword";
                         var row = new WorkbookRow(
                             rowGuid,
                             1,

@@ -12,6 +12,7 @@ using ExcelDb.Workbooks.Identity;
 using ExcelDb.Workbooks.Importing;
 using ExcelDb.Workbooks.Model;
 using ExcelDb.Workbooks.OpenXml;
+using ExcelDb.Workbooks.References;
 using ExcelDb.Workbooks.Transactions;
 using ExcelDbEditor;
 
@@ -227,6 +228,7 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
                 foreach (var preparation in preparationArray)
                 {
                     ApplyMergedValuesToSubmittedAssets(
+                        preparation.Path,
                         preparation.Request.Items,
                         preparation.MergedRows,
                         preparation.CurrentWorkbook);
@@ -333,10 +335,11 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
         }
 
         state.Drafts.Discard();
+        var domainRows = BuildDomainRows(path, theirs.Rows);
         var capturedRows = new Dictionary<AssetIdentity, SnapshotRow>();
         var preparationDiagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
         foreach (var item in request.Items)
-            PrepareDraft(state, theirs, item, capturedRows, preparationDiagnostics, plannedDeletes);
+            PrepareDraft(state, theirs, domainRows, item, capturedRows, preparationDiagnostics, plannedDeletes);
         if (preparationDiagnostics.Any(static diagnostic => diagnostic.IsFailure))
         {
             return new SavePreparationResult(
@@ -500,13 +503,21 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
         var runtimeRecords = ImmutableDictionary.CreateBuilder<AssetIdentity, RuntimeAssetRecord>();
         if (!diagnostics.Any(static diagnostic => diagnostic.IsFailure))
         {
+            var domainRows = BuildDomainRows(path, imported.Rows);
             foreach (var row in imported.Rows.Where(static row => row.IsIndexable && row.Identity is not null))
             {
                 try
                 {
                     var codec = RequireCodec(row.TableId);
                     var binding = _bindings[row.TableId];
-                    var record = codec.CreateRuntimeRecord(row);
+                    var projected = ProjectRuntimeReferences(row, domainRows);
+                    var unboundRecord = codec.CreateRuntimeRecord(projected.Row);
+                    var record = new RuntimeAssetRecord(
+                        unboundRecord.Identity,
+                        unboundRecord.Key,
+                        unboundRecord.Fields,
+                        unboundRecord.Dependencies.Concat(projected.Dependencies).Distinct(),
+                        unboundRecord.Path);
                     ValidateRuntimeRecord(row, record);
                     var asset = binding.Create();
                     binding.ResetToDefaults(asset);
@@ -567,6 +578,7 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
     private void PrepareDraft(
         AdapterState state,
         WorkbookImportResult theirs,
+        ImmutableArray<ImportedRow> domainRows,
         AuthoringSaveItem item,
         Dictionary<AssetIdentity, SnapshotRow> capturedRows,
         ImmutableArray<Diagnostic>.Builder diagnostics,
@@ -643,8 +655,9 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
         try
         {
             captured = codec.Capture(item, baseline);
+            captured = ProjectCapturedReferences(captured, baseline, domainRows);
         }
-        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException or NotSupportedException)
+        catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or ArgumentException or NotSupportedException)
         {
             diagnostics.Add(Blocker("EXAW0118", identity.ToString(), exception.Message));
             return;
@@ -788,10 +801,13 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
     }
 
     private void ApplyMergedValuesToSubmittedAssets(
+        string path,
         ImmutableArray<AuthoringSaveItem> items,
         ImmutableDictionary<AssetIdentity, SnapshotRow> merged,
         WorkbookDefinition workbook)
     {
+        var currentRows = merged.Values.Select(row => ToImportedRow(row, workbook)).ToImmutableArray();
+        var domainRows = BuildDomainRows(path, currentRows);
         foreach (var item in items.Where(static item => !item.Deleted && item.Asset is not null))
         {
             var identity = new AssetIdentity(item.TableId, item.Guid.Value);
@@ -809,8 +825,144 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
                 row.RawCells,
                 true,
                 ImportChangeKind.Modified);
-            var record = RequireCodec(item.TableId).CreateRuntimeRecord(imported);
+            var projected = ProjectRuntimeReferences(imported, domainRows);
+            var unboundRecord = RequireCodec(item.TableId).CreateRuntimeRecord(projected.Row);
+            var record = new RuntimeAssetRecord(
+                unboundRecord.Identity,
+                unboundRecord.Key,
+                unboundRecord.Fields,
+                unboundRecord.Dependencies.Concat(projected.Dependencies).Distinct(),
+                unboundRecord.Path);
             _bindings[item.TableId].Apply(item.Asset!, record);
+        }
+    }
+
+    private ImmutableArray<ImportedRow> BuildDomainRows(
+        string currentPath,
+        IEnumerable<ImportedRow> currentRows) =>
+        _states
+            .Where(pair => !string.Equals(pair.Key, currentPath, StringComparison.OrdinalIgnoreCase))
+            .SelectMany(static pair => pair.Value.Imported.Rows)
+            .Concat(currentRows)
+            .ToImmutableArray();
+
+    private ResolvedRuntimeRow ProjectRuntimeReferences(
+        ImportedRow row,
+        ImmutableArray<ImportedRow> domainRows)
+    {
+        var table = _schema.Tables.Single(item => item.Id == row.TableId);
+        var values = row.Values.ToBuilder();
+        var dependencies = ImmutableArray.CreateBuilder<AssetIdentity>();
+        foreach (var field in FlattenFields(table.Fields).Where(IsRowReference))
+        {
+            if (!values.TryGetValue(field.PropertyPath, out var value)
+                || value.State is CanonicalValueState.Missing or CanonicalValueState.Null)
+            {
+                continue;
+            }
+            if (value.State == CanonicalValueState.Invalid)
+                throw new InvalidDataException($"RowRef field '{table.Name}.{field.PropertyPath}' is invalid.");
+
+            var resolution = RowReferenceResolver.Resolve(field, value.Text!, _schema, domainRows);
+            if (!resolution.Succeeded)
+                throw new InvalidDataException(resolution.Error);
+            var identityText = resolution.Identity.ToString();
+            values[field.PropertyPath] = value.State == CanonicalValueState.Defaulted
+                ? CanonicalValue.FromDefault(identityText)
+                : CanonicalValue.FromValue(identityText);
+            dependencies.Add(resolution.Identity);
+        }
+
+        return new ResolvedRuntimeRow(
+            row with { Values = values.ToImmutable() },
+            dependencies.ToImmutable());
+    }
+
+    private SnapshotRow ProjectCapturedReferences(
+        SnapshotRow captured,
+        SnapshotRow? baseline,
+        ImmutableArray<ImportedRow> domainRows)
+    {
+        var table = _schema.Tables.Single(item => item.Id == captured.Identity.TableId);
+        var values = captured.Values.ToBuilder();
+        foreach (var field in FlattenFields(table.Fields).Where(IsRowReference))
+        {
+            if (!values.TryGetValue(field.PropertyPath, out var value)
+                || value.State is CanonicalValueState.Missing or CanonicalValueState.Null)
+            {
+                continue;
+            }
+            if (value.State == CanonicalValueState.Invalid
+                || !AssetIdentity.TryParse(value.Text, out var target))
+            {
+                throw new InvalidDataException(
+                    $"Generated RowRef field '{table.Name}.{field.PropertyPath}' did not capture a stable asset identity.");
+            }
+
+            var targetRow = domainRows.SingleOrDefault(row => row.IsIndexable && row.Identity == target)
+                ?? throw new InvalidDataException($"RowRef target '{target}' is absent from the mounted workbook domain.");
+            if (!CanonicalKeyCodec.TryParse(targetRow.Key, out var keyComponents))
+                throw new InvalidDataException($"RowRef target '{target}' has no valid canonical key.");
+            var token = RowReferenceToken.Format(target.TableId, keyComponents);
+            var resolution = RowReferenceResolver.Resolve(field, token, _schema, domainRows);
+            if (!resolution.Succeeded || resolution.Identity != target)
+                throw new InvalidDataException(resolution.Error ?? $"RowRef target '{target}' violates its schema constraint.");
+
+            var projected = value.State == CanonicalValueState.Defaulted
+                ? CanonicalValue.FromDefault(token)
+                : CanonicalValue.FromValue(token);
+            if (baseline is not null
+                && baseline.Values.TryGetValue(field.PropertyPath, out var previous)
+                && previous.State == CanonicalValueState.Defaulted
+                && projected.State == CanonicalValueState.Value
+                && string.Equals(previous.Text, projected.Text, StringComparison.Ordinal))
+            {
+                projected = previous;
+            }
+            values[field.PropertyPath] = projected;
+        }
+
+        var projectedValues = values.ToImmutable();
+        return captured with { Values = projectedValues, RawValues = projectedValues };
+    }
+
+    private static ImportedRow ToImportedRow(SnapshotRow row, WorkbookDefinition workbook)
+    {
+        var table = workbook.Tables.Single(item => item.TableId == row.Identity.TableId);
+        return new ImportedRow(
+            row.Identity,
+            row.Identity.TableId,
+            table.SheetName,
+            0,
+            row.Revision,
+            row.Key,
+            row.Values,
+            row.RawCells,
+            true,
+            ImportChangeKind.Modified)
+        {
+            RawValues = row.RawValues,
+        };
+    }
+
+    private static bool IsRowReference(CanonicalFieldDescriptor field) =>
+        field.Shape == CanonicalFieldShape.Message
+        && string.Equals(field.TypeName, "exceldb.RowRef", StringComparison.Ordinal);
+
+    private static IEnumerable<CanonicalFieldDescriptor> FlattenFields(
+        ImmutableArray<CanonicalFieldDescriptor> fields)
+    {
+        foreach (var field in fields)
+        {
+            if (!field.Children.IsDefaultOrEmpty && field.ExpandMode == CanonicalExpandMode.ExpandedColumns)
+            {
+                foreach (var child in FlattenFields(field.Children))
+                    yield return child;
+            }
+            else
+            {
+                yield return field;
+            }
         }
     }
 
@@ -918,6 +1070,10 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
         ImmutableHashSet<ConflictKey> AppliedResolutionKeys);
 
     private readonly record struct ConflictKey(AssetIdentity Identity, string Path);
+
+    private readonly record struct ResolvedRuntimeRow(
+        ImportedRow Row,
+        ImmutableArray<AssetIdentity> Dependencies);
 
     private sealed record AdapterState(
         string Path,
