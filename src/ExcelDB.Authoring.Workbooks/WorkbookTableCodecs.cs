@@ -120,6 +120,7 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
     private readonly CanonicalTableDescriptor _table;
     private readonly ImmutableArray<CanonicalFieldDescriptor> _fields;
     private readonly IReadOnlyDictionary<string, string> _memberPaths;
+    private readonly IReadOnlyDictionary<string, Func<object?, string>> _canonicalWriters;
     private readonly Func<ImportedRow, IEnumerable<AssetIdentity>>? _decodeDependencies;
 
     public ReflectionAuthoringWorkbookTableCodec(
@@ -132,7 +133,8 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
     public ReflectionAuthoringWorkbookTableCodec(
         CanonicalTableDescriptor table,
         Func<ImportedRow, IEnumerable<AssetIdentity>>? decodeDependencies,
-        IReadOnlyDictionary<string, string>? memberPaths)
+        IReadOnlyDictionary<string, string>? memberPaths,
+        IReadOnlyDictionary<string, Func<object?, string>>? canonicalWriters = null)
     {
         _table = table ?? throw new ArgumentNullException(nameof(table));
         _fields = Flatten(table.Fields).ToImmutableArray();
@@ -149,6 +151,9 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
         _memberPaths = memberPaths is null
             ? ImmutableDictionary<string, string>.Empty
             : memberPaths.ToImmutableDictionary(StringComparer.Ordinal);
+        _canonicalWriters = canonicalWriters is null
+            ? ImmutableDictionary<string, Func<object?, string>>.Empty
+            : canonicalWriters.ToImmutableDictionary(StringComparer.Ordinal);
         _decodeDependencies = decodeDependencies;
     }
 
@@ -193,7 +198,7 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
                 _memberPaths.TryGetValue(field.PropertyPath, out var memberPath)
                     ? memberPath
                     : field.PropertyPath);
-            var value = ToCanonical(rawValue);
+            var value = ToCanonical(field, rawValue);
             if (baseline is not null
                 && baseline.Values.TryGetValue(field.PropertyPath, out var previous)
                 && PreservesSourceState(previous, value, rawValue))
@@ -259,26 +264,32 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
             && string.Equals(previous.Text, candidate.Text, StringComparison.Ordinal);
     }
 
-    private static CanonicalValue ToCanonical(object? value) => value switch
+    private CanonicalValue ToCanonical(CanonicalFieldDescriptor field, object? value)
     {
-        null => CanonicalValue.Null,
-        string text => CanonicalValue.FromValue(text),
-        bool boolean => CanonicalValue.FromValue(CanonicalValue.CanonicalizeBoolean(boolean)),
-        byte number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
-        sbyte number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
-        short number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
-        ushort number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
-        int number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
-        uint number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
-        long number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
-        ulong number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
-        float number when float.IsFinite(number) => CanonicalValue.FromValue(number.ToString("R", CultureInfo.InvariantCulture)),
-        double number when double.IsFinite(number) => CanonicalValue.FromValue(number.ToString("R", CultureInfo.InvariantCulture)),
-        decimal number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
-        Enum enumValue => CanonicalValue.FromValue(enumValue.ToString()),
-        Guid guid => CanonicalValue.FromValue(guid.ToString("N")),
-        _ => CanonicalValue.FromValue(JsonSerializer.Serialize(value, value.GetType())),
-    };
+        if (value is null)
+            return CanonicalValue.Null;
+        if (_canonicalWriters.TryGetValue(field.PropertyPath, out var writer))
+            return CanonicalValue.FromValue(writer(value));
+        return value switch
+        {
+            string text => CanonicalValue.FromValue(text),
+            bool boolean => CanonicalValue.FromValue(CanonicalValue.CanonicalizeBoolean(boolean)),
+            byte number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
+            sbyte number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
+            short number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
+            ushort number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
+            int number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
+            uint number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
+            long number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
+            ulong number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
+            float number when float.IsFinite(number) => CanonicalValue.FromValue(number.ToString("R", CultureInfo.InvariantCulture)),
+            double number when double.IsFinite(number) => CanonicalValue.FromValue(number.ToString("R", CultureInfo.InvariantCulture)),
+            decimal number => CanonicalValue.FromValue(number.ToString(CultureInfo.InvariantCulture)),
+            Enum enumValue => CanonicalValue.FromValue(enumValue.ToString()),
+            Guid guid => CanonicalValue.FromValue(guid.ToString("N")),
+            _ => CanonicalValue.FromValue(JsonSerializer.Serialize(value, value.GetType())),
+        };
+    }
 
     private static object? ReadMemberPath(object instance, string propertyPath)
     {

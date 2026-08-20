@@ -352,6 +352,19 @@ public sealed class SchemaCodeGenerator
             builder.AppendLine("        else if (type == typeof(ulong)) value = ulong.Parse(text, NumberStyles.Integer, CultureInfo.InvariantCulture);");
             builder.AppendLine("        else if (type == typeof(float)) value = float.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture);");
             builder.AppendLine("        else if (type == typeof(double)) value = double.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture);");
+            builder.AppendLine("        else if (type == typeof(RowRef))");
+            builder.AppendLine("        {");
+            builder.AppendLine("            var separator = text.IndexOf(':');");
+            builder.AppendLine("            var rowGuidText = separator < 0 ? string.Empty : text.Substring(separator + 1);");
+            builder.AppendLine("            if (separator <= 0");
+            builder.AppendLine("                || !int.TryParse(text.Substring(0, separator), NumberStyles.Integer, CultureInfo.InvariantCulture, out var table)");
+            builder.AppendLine("                || table <= 0");
+            builder.AppendLine("                || !Guid.TryParseExact(rowGuidText, \"N\", out var rowGuid)");
+            builder.AppendLine("                || rowGuid == Guid.Empty");
+            builder.AppendLine("                || !string.Equals(rowGuid.ToString(\"N\", CultureInfo.InvariantCulture), rowGuidText, StringComparison.Ordinal))");
+            builder.AppendLine("                throw new FormatException($\"Invalid RowRef '{text}'.\");");
+            builder.AppendLine("            value = new RowRef(table, rowGuid);");
+            builder.AppendLine("        }");
             builder.AppendLine("        else if (type.IsEnum) value = int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number) ? Enum.ToObject(type, number) : Enum.Parse(type, text, false);");
             builder.AppendLine("        else return JsonSerializer.Deserialize<T>(text, JsonOptions)!;");
             builder.AppendLine("        return (T)value;");
@@ -361,6 +374,7 @@ public sealed class SchemaCodeGenerator
             builder.AppendLine("        if (value is null) return string.Empty;");
             builder.AppendLine("        if (value is string text) return text;");
             builder.AppendLine("        if (value is byte[] bytes) return Convert.ToBase64String(bytes);");
+            builder.AppendLine("        if (value is RowRef reference) return reference.Table.ToString(CultureInfo.InvariantCulture) + \":\" + reference.RowGuid.ToString(\"N\", CultureInfo.InvariantCulture);");
             builder.AppendLine("        if (value is IFormattable formattable) return formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty;");
             builder.AppendLine("        return JsonSerializer.Serialize(value, JsonOptions);");
             builder.AppendLine("    }");
@@ -809,6 +823,8 @@ public sealed class SchemaCodeGenerator
                 .Append(">(GeneratedAuthoringRuntimeSupport.GetSchemaTable(")
                 .Append(table.Id.ToString(CultureInfo.InvariantCulture))
                 .Append("), decodeDependencies: null, memberPaths: GeneratedAuthoringRuntimeSupport.GetMemberPaths(")
+                .Append(table.Id.ToString(CultureInfo.InvariantCulture))
+                .Append("), canonicalWriters: GeneratedAuthoringRuntimeSupport.GetCanonicalWriters(")
                 .Append(table.Id.ToString(CultureInfo.InvariantCulture)).AppendLine(")),");
         }
         builder.AppendLine("    });");
@@ -887,6 +903,7 @@ public sealed class SchemaCodeGenerator
         builder.AppendLine("    }");
         builder.AppendLine("    public static CanonicalTableDescriptor GetSchemaTable(int tableId) => GeneratedAuthoringHost.Schema.Tables.SingleOrDefault(table => table.Id == tableId) ?? throw new ArgumentOutOfRangeException(nameof(tableId));");
         builder.AppendLine("    public static IReadOnlyDictionary<string, string> GetMemberPaths(int tableId) => GetTable(tableId).Fields.ToDictionary(static field => field.PropertyPath, static field => field.MemberPath, StringComparer.Ordinal);");
+        builder.AppendLine("    public static IReadOnlyDictionary<string, Func<object?, string>> GetCanonicalWriters(int tableId) => GetTable(tableId).Fields.ToDictionary(static field => field.PropertyPath, static field => field.Writer, StringComparer.Ordinal);");
         builder.AppendLine("    private static GeneratedTableBinding GetTable(int tableId) => Tables.TryGetValue(tableId, out var table) ? table : throw new ArgumentOutOfRangeException(nameof(tableId));");
         builder.AppendLine("    private static GeneratedFieldBinding[] KeyFields(GeneratedTableBinding table)");
         builder.AppendLine("    {");

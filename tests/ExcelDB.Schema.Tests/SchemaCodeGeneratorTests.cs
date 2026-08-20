@@ -310,7 +310,10 @@ public sealed class SchemaCodeGeneratorTests
                             throw new InvalidOperationException("Generated authoring descriptor did not round-trip.");
 
                         var configTable = schema.Tables.Single(static table => table.Name == "Config");
+                        var itemTable = schema.Tables.Single(static table => table.Name == "Item");
                         var rowGuid = ExcelDb.Core.Identity.RowGuid.Parse("00000000000000000000000000000101");
+                        var dependencyGuid = Guid.ParseExact("00000000000000000000000000000102", "N");
+                        var dependencyToken = "78:" + dependencyGuid.ToString("N");
                         var row = new WorkbookRow(
                             rowGuid,
                             1,
@@ -318,12 +321,25 @@ public sealed class SchemaCodeGeneratorTests
                             {
                                 new KeyValuePair<string, WorkbookCell>("id", new WorkbookCell("hero")),
                                 new KeyValuePair<string, WorkbookCell>("authoring_note", new WorkbookCell("old")),
+                                new KeyValuePair<string, WorkbookCell>("direct_item", new WorkbookCell(dependencyToken)),
                             }),
                             "4:hero");
+                        var dependencyRow = new WorkbookRow(
+                            ExcelDb.Core.Identity.RowGuid.Parse(dependencyGuid.ToString("N")),
+                            1,
+                            ImmutableDictionary.CreateRange(StringComparer.Ordinal, new[]
+                            {
+                                new KeyValuePair<string, WorkbookCell>("id", new WorkbookCell("sword")),
+                            }),
+                            "5:sword");
                         var workbook = WorkbookDefinition.Empty(schema) with
                         {
                             Tables = WorkbookDefinition.Empty(schema).Tables
-                                .Select(table => table.TableId == configTable.Id ? table with { Rows = ImmutableArray.Create(row) } : table)
+                                .Select(table => table.TableId == configTable.Id
+                                    ? table with { Rows = ImmutableArray.Create(row) }
+                                    : table.TableId == itemTable.Id
+                                        ? table with { Rows = ImmutableArray.Create(dependencyRow) }
+                                        : table)
                                 .ToImmutableArray(),
                         };
                         var path = Path.Combine(Path.GetTempPath(), "exceldb-generated-host-" + Guid.NewGuid().ToString("N") + ".xlsx");
@@ -344,9 +360,10 @@ public sealed class SchemaCodeGeneratorTests
                                     + string.Join(" | ", session.Diagnostics.Select(static item => item.Diagnostic.Code + ":" + item.Diagnostic.Message)));
                             if (config.AuthoringNote != "old")
                                 throw new InvalidOperationException("Generated authoring runtime binding did not apply workbook data.");
+                            if (config.DirectItem?.Table != 78 || config.DirectItem?.RowGuid != dependencyGuid)
+                                throw new InvalidOperationException("Generated authoring runtime binding did not parse canonical RowRef data.");
 
                             var registration = GeneratedAuthoringHost.TableRegistrations.Single(static table => table.TableId == 77);
-                            var dependencyGuid = Guid.ParseExact("00000000000000000000000000000102", "N");
                             config.DirectItem = new RowRef(78, dependencyGuid);
                             config.Levels.Add(1);
                             var clone = (Config)registration.Clone(config);
@@ -359,7 +376,6 @@ public sealed class SchemaCodeGeneratorTests
                             var dependency = registration.GetDependencies!(config).Single();
                             if (dependency.ToString() != dependencyGuid.ToString("N"))
                                 throw new InvalidOperationException("Generated RowRef dependency projection was incorrect.");
-                            config.DirectItem = null;
 
                             config.AuthoringNote = "saved";
                             EditorUtility.SetDirty(config);
@@ -368,6 +384,8 @@ public sealed class SchemaCodeGeneratorTests
                             var savedRow = saved.Tables.Single(table => table.TableId == configTable.Id).Rows.Single();
                             if (savedRow.Cells["authoring_note"].Text != "saved")
                                 throw new InvalidOperationException("Generated authoring session did not persist the edited value.");
+                            if (savedRow.Cells["direct_item"].Text != dependencyToken)
+                                throw new InvalidOperationException("Generated authoring session did not preserve canonical RowRef data.");
                         }
                         finally
                         {
