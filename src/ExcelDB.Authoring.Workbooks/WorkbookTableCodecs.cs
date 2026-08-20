@@ -119,22 +119,36 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
 {
     private readonly CanonicalTableDescriptor _table;
     private readonly ImmutableArray<CanonicalFieldDescriptor> _fields;
+    private readonly IReadOnlyDictionary<string, string> _memberPaths;
     private readonly Func<ImportedRow, IEnumerable<AssetIdentity>>? _decodeDependencies;
 
     public ReflectionAuthoringWorkbookTableCodec(
         CanonicalTableDescriptor table,
         Func<ImportedRow, IEnumerable<AssetIdentity>>? decodeDependencies = null)
+        : this(table, decodeDependencies, memberPaths: null)
+    {
+    }
+
+    public ReflectionAuthoringWorkbookTableCodec(
+        CanonicalTableDescriptor table,
+        Func<ImportedRow, IEnumerable<AssetIdentity>>? decodeDependencies,
+        IReadOnlyDictionary<string, string>? memberPaths)
     {
         _table = table ?? throw new ArgumentNullException(nameof(table));
         _fields = Flatten(table.Fields).ToImmutableArray();
-        var duplicateId = _fields.GroupBy(static field => field.Id).FirstOrDefault(static group => group.Count() > 1);
-        if (duplicateId is not null)
+        var duplicatePath = _fields
+            .GroupBy(static field => FieldPath(field), StringComparer.Ordinal)
+            .FirstOrDefault(static group => group.Count() > 1);
+        if (duplicatePath is not null)
         {
             throw new ArgumentException(
-                $"Expanded table '{table.Name}' repeats runtime field number {duplicateId.Key}; provide a custom codec.",
+                $"Expanded table '{table.Name}' repeats runtime field path {duplicatePath.Key}; provide a custom codec.",
                 nameof(table));
         }
 
+        _memberPaths = memberPaths is null
+            ? ImmutableDictionary<string, string>.Empty
+            : memberPaths.ToImmutableDictionary(StringComparer.Ordinal);
         _decodeDependencies = decodeDependencies;
     }
 
@@ -152,7 +166,7 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
         var key = row.Key
             ?? throw new ArgumentException("An indexable runtime row requires a key.", nameof(row));
         var fields = _fields.Select(field => new RuntimeFieldValue(
-            field.Id,
+            field.FieldIdPath.IsDefaultOrEmpty ? [field.Id] : field.FieldIdPath,
             CanonicalRuntimeFieldEncoding.Encode(
                 row.Values.GetValueOrDefault(field.PropertyPath, CanonicalValue.Missing))));
         return new RuntimeAssetRecord(
@@ -174,7 +188,11 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
         var values = ImmutableDictionary.CreateBuilder<string, CanonicalValue>(StringComparer.Ordinal);
         foreach (var field in _fields)
         {
-            var rawValue = ReadMemberPath(asset, field.PropertyPath);
+            var rawValue = ReadMemberPath(
+                asset,
+                _memberPaths.TryGetValue(field.PropertyPath, out var memberPath)
+                    ? memberPath
+                    : field.PropertyPath);
             var value = ToCanonical(rawValue);
             if (baseline is not null
                 && baseline.Values.TryGetValue(field.PropertyPath, out var previous)
@@ -301,6 +319,9 @@ public sealed class ReflectionAuthoringWorkbookTableCodec<T> : IAuthoringWorkboo
 
     private static string NormalizeMemberName(string value) =>
         string.Concat(value.Where(static character => character != '_')).ToUpperInvariant();
+
+    private static string FieldPath(CanonicalFieldDescriptor field) =>
+        string.Join('.', field.FieldIdPath.IsDefaultOrEmpty ? [field.Id] : field.FieldIdPath);
 
     private static IEnumerable<CanonicalFieldDescriptor> Flatten(
         ImmutableArray<CanonicalFieldDescriptor> fields)

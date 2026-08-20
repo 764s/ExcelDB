@@ -123,7 +123,7 @@ public sealed class GeneratedEditorEndToEndTests
             (contract.TableId("game.Prop"), propGuid),
             contract.ReadRepeatedRowRef(effect!, "effects.group_target"));
         Assert.Equal(EditorHistoryStatus.Applied, history.TryUndo().Status);
-        Assert.Null(contract.ReadConfigField(resident, "effects"));
+        Assert.Empty((IList)contract.ReadConfigField(resident, "effects")!);
 
         // This path uses names that collide after C# identifier normalization at two nested levels.
         // The assertion therefore exercises the actual generated MemberPath, not a hand-written fake.

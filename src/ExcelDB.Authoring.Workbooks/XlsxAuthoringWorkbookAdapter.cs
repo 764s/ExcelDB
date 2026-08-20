@@ -855,8 +855,13 @@ public sealed class XlsxAuthoringWorkbookAdapter : ITransactionalAuthoringWorkbo
             throw new InvalidDataException("Table codec changed imported identity/table or emitted an empty authoring key.");
         }
 
-        if (record.Fields.Select(static field => field.FieldNumber).Distinct().Count() != record.Fields.Length)
-            throw new InvalidDataException("Table codec emitted duplicate runtime field numbers.");
+        if (record.Fields
+                .Select(static field => string.Join('.', field.FieldIdPath))
+                .Distinct(StringComparer.Ordinal)
+                .Count() != record.Fields.Length)
+        {
+            throw new InvalidDataException("Table codec emitted duplicate runtime field paths.");
+        }
     }
 
     private static Diagnostic Blocker(string code, string location, string message) =>
